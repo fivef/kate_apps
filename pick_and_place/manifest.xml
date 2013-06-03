@@ -1,0 +1,24 @@
+<package>
+  <description brief="pick_and_place">
+
+     pick_and_place
+
+  </description>
+  <author>sp</author>
+  <license>BSD</license>
+  <review status="unreviewed" notes=""/>
+  <url>http://ros.org/wiki/pick_and_place</url>
+  <depend package="roscpp"/>
+  <depend package="moveit_core"/>
+  <depend package="moveit_ros_planning_interface"/>
+  <depend package="interactive_markers"/>
+  <depend package="tabletop_object_detector"/>
+  <depend package="tabletop_collision_map_processing"/>
+  <depend package="arm_navigation_msgs"/>
+  <depend package="pr2_object_manipulation_msgs"/>
+  <depend package="visualization_msgs"/>
+  <depend package="pcl"/>
+  <depend package="pcl_ros"/>		
+</package>
+
+
