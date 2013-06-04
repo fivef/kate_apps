@@ -13,5 +13,6 @@ srv_gen/
 CATKIN_IGNORE
 gtest/
 catkin_generated/
+catkin/
 devel/
 *~
