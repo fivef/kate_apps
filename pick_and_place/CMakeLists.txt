@@ -36,4 +36,4 @@ include_directories(${EIGEN_INCLUDE_DIRS})
 add_definitions(${EIGEN_DEFINITIONS})
 
 rosbuild_add_executable(pick_and_place src/pick_and_place.cpp)
-rosbuild_add_executable(move_test src/move_test.cpp)
+

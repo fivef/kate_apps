@@ -8,10 +8,18 @@
 #include <boost/spirit/include/classic.hpp>
 #include "visualization_msgs/Marker.h"
 #include <sensor_msgs/PointCloud2.h>
-
+#include <sensor_msgs/point_cloud_conversion.h>
 #include <math.h>
+#include <sstream>
 
+#include <object_manipulation_msgs/FindClusterBoundingBox2.h>
+#include <tabletop_object_detector/TabletopDetection.h>
+#include "/home/sp/groovy_rosbuild_workspace/overlay/tabletop_collision_map_processing/srv_gen/cpp/include/tabletop_collision_map_processing/TabletopCollisionMapProcessing.h"
 
+//for PTU dynamic reconfigure
+#include <dynamic_reconfigure/DoubleParameter.h>
+#include <dynamic_reconfigure/Reconfigure.h>
+#include <dynamic_reconfigure/Config.h>
 
 // MoveIt!
 #include <moveit/pick_place/pick_place.h>
@@ -20,7 +28,6 @@
 #include <shape_tools/solid_primitive_dims.h>
 
 // PCL specific includes
-
 #include <pcl-1.6/pcl/common/eigen.h>
 #include <pcl-1.6/pcl/ros/conversions.h>
 #include <pcl-1.6/pcl/point_cloud.h>
@@ -44,6 +51,15 @@ const std::string PLACE_ACTION_NAME =
 		"/object_manipulator/object_manipulator_place";
 const std::string MOVE_ARM_ACTION_NAME = "/move_arm";
 const std::string COLLIDER_RESET_SERVICE_NAME = "/collider_node/reset";
+
+static const std::string CLUSTER_BOUNDING_BOX2_3D_NAME = "find_cluster_bounding_box2_3d";
+
+//! General base class for all exceptions originating in the collision map interface
+class CollisionMapException : public std::runtime_error
+{
+ public:
+ CollisionMapException(const std::string error) : std::runtime_error("collision map: "+error) {};
+};
 
 class Pick_and_place_app {
 
@@ -70,6 +86,12 @@ private:
 	std::string WRIST_JOINT;
 
 	std::string FINGER_JOINT;
+
+	std::string ARM_NAME;
+
+	static const int NORMAL = 1;
+	static const int SEGMENTED_OBJECT_SELECTION = 2;
+	std::string WORKING_MODE;
 
 	geometry_msgs::Point desired_pickup_point;
 
@@ -106,6 +128,11 @@ private:
 	//Is gazebo simulation? Is set from parameter server param: sim
 	int sim;
 
+	// processing_call.response contains the graspable objects
+	tabletop_collision_map_processing::TabletopCollisionMapProcessing processing_call;
+
+	ros::ServiceClient cluster_bounding_box2_3d_client_;
+
 	//service and action clients
 	ros::ServiceClient object_detection_srv;
 	ros::ServiceClient collision_processing_srv;
@@ -132,10 +159,12 @@ public:
 
 		nh.param<std::string>("KATANA_BASE_LINK", KATANA_BASE_LINK,"/katana_base_link");
 
-		nh.param<std::string>("BASE_FOOTPRINT", BASE_FOOTPRINT,"/base_footprint");
+		//nh.param<std::string>("BASE_FOOTPRINT", BASE_FOOTPRINT,"/base_footprint"); //TODO change back
+		nh.param<std::string>("BASE_FOOTPRINT", BASE_FOOTPRINT,"/base_link");
 
-		 nh.param<std::string>("WRIST_JOINT", WRIST_JOINT,"/katana_motor5_wrist_roll_joint");
-		  nh.param<std::string>("FINGER_JOINT", FINGER_JOINT,"/katana_l_finger_joint");
+		nh.param<std::string>("WRIST_JOINT", WRIST_JOINT,"/katana_gripper_link");
+		nh.param<std::string>("FINGER_JOINT", FINGER_JOINT,"/katana_l_finger_joint");
+		nh.param<std::string>("ARM_NAME", ARM_NAME,"arm");
 
 		clicked = 0;
 
@@ -151,13 +180,15 @@ public:
 		ros::WallDuration(1.0).sleep();
 
 
-		group = new move_group_interface::MoveGroup("arm");
+		group = new move_group_interface::MoveGroup(ARM_NAME);
 
-		group->setPlanningTime(45.0);
+		//group->setPlanningTime(5.0);
 
-		group->setGoalTolerance(1.0);
+		group->setGoalTolerance(0.01);
+		//group->setGoalOrientationTolerance(1.0);
 
-		group->allowReplanning(true);
+
+		//group->allowReplanning(true);
 
 
 
@@ -170,16 +201,41 @@ public:
 				"move_arm_out_of_the_way",
 				&Pick_and_place_app::move_arm_out_of_the_way_callback, this);
 
-
+		//wait for detection client
+		while (!ros::service::waitForService(OBJECT_DETECTION_SERVICE_NAME,
+				ros::Duration(2.0)) && nh.ok()) {
+			ROS_INFO("Waiting for object detection service to come up");
+		}
+		if (!nh.ok())
+			exit(0);
+		object_detection_srv = nh.serviceClient<
+				tabletop_object_detector::TabletopDetection>(
+				OBJECT_DETECTION_SERVICE_NAME, true);
 
 
 		vis_marker_publisher = nh.advertise<visualization_msgs::Marker>(
 				"pick_and_place_markers", 128);
 
+		//wait for collision map processing client
+		while (!ros::service::waitForService(COLLISION_PROCESSING_SERVICE_NAME,
+				ros::Duration(2.0)) && nh.ok()) {
+			ROS_INFO("Waiting for collision processing service to come up");
+		}
+		if (!nh.ok())
+			exit(0);
+		collision_processing_srv =
+				nh.serviceClient<
+						tabletop_collision_map_processing::TabletopCollisionMapProcessing>(
+						COLLISION_PROCESSING_SERVICE_NAME, true);
+
+		cluster_bounding_box2_3d_client_ = nh.serviceClient<object_manipulation_msgs::FindClusterBoundingBox2>
+		    (CLUSTER_BOUNDING_BOX2_3D_NAME, true);
 
 
 		//Sets the kinects tilt angle
-		system("rosrun dynamic_reconfigure dynparam set /joint_commander kurtana_pitch_joint 0.85");
+
+		set_kinect_ptu("kurtana_pitch_joint", 0.85);
+
 
 		ROS_INFO("Kinect lined up.");
 
@@ -193,8 +249,7 @@ public:
 	~Pick_and_place_app() {
 
 		//Sets the kinects tilt angle
-				system(
-						"rosrun dynamic_reconfigure dynparam set /joint_commander kurtana_pitch_joint 0.0");
+		set_kinect_ptu("kurtana_pitch_joint", 0.0);
 
 	}
 
@@ -209,6 +264,22 @@ public:
 
 	}
 
+	void set_kinect_ptu(std::string joint_name, double value){
+
+		dynamic_reconfigure::ReconfigureRequest srv_req;
+			dynamic_reconfigure::ReconfigureResponse srv_resp;
+			dynamic_reconfigure::DoubleParameter double_param;
+			dynamic_reconfigure::Config conf;
+
+			double_param.name = joint_name;
+			double_param.value = value;
+			conf.doubles.push_back(double_param);
+
+			srv_req.config = conf;
+
+			ros::service::call("/joint_commander/set_parameters", srv_req, srv_resp);
+	}
+
 	geometry_msgs::Point get_pickup_point() {
 
 		return desired_pickup_point;
@@ -217,8 +288,7 @@ public:
 	void pick_and_place() {
 
 		//Sets the kinects tilt angle
-		system(
-				"rosrun dynamic_reconfigure dynparam set /joint_commander kurtana_pitch_joint 0.85");
+		set_kinect_ptu("kurtana_pitch_joint", 0.85);
 
 		if (move_arm_out_of_the_way()) {
 
@@ -266,36 +336,45 @@ public:
 		pickup_point.point.y = desired_pickup_point.y;
 		pickup_point.point.z = desired_pickup_point.z;
 */
+		/*
+		// ----- call the tabletop detection
+		ROS_INFO("Calling tabletop detector");
+		tabletop_object_detector::TabletopDetection detection_call;
+		//we want recognized database objects returned
+		//set this to false if you are using the pipeline without the database
+		detection_call.request.return_models = false;
+
+		//we want the individual object point clouds returned as well
+		detection_call.request.return_clusters = true;
+
+		if (!object_detection_srv.call(detection_call)) {
+			ROS_ERROR("Tabletop detection service failed");
+			return -1;
+		}
+		if (detection_call.response.detection.result
+				!= detection_call.response.detection.SUCCESS) {
+			ROS_ERROR(
+					"Tabletop detection returned error code %d", detection_call.response.detection.result);
+			return -1;
+		}
+		if (detection_call.response.detection.clusters.empty()
+				&& detection_call.response.detection.models.empty()) {
+			ROS_ERROR(
+					"The tabletop detector detected the table, but found no objects");
+			return -1;
+		}
 
 
-		ROS_INFO("Adding fake object");
-		//add fake object
+		ROS_INFO("Add table to planning scene");
 
 		moveit_msgs::CollisionObject collision_object;
 
 		collision_object.header.stamp = ros::Time::now();
-		collision_object.header.frame_id = KATANA_BASE_LINK;
+		collision_object.header.frame_id = detection_call.response.detection.table.pose.header.frame_id;
 
-		collision_object.id = "part";
+		ROS_INFO_STREAM("Collision Object frame: " << detection_call.response.detection.table.pose.header.frame_id);
 
-		collision_object.operation = moveit_msgs::CollisionObject::REMOVE;
-
-		pub_collision_object.publish(collision_object);
-
-
-		collision_object.operation = moveit_msgs::CollisionObject::ADD;
-		collision_object.primitives.resize(1);
-		collision_object.primitives[0].type = shape_msgs::SolidPrimitive::BOX;
-		collision_object.primitives[0].dimensions.resize(shape_tools::SolidPrimitiveDimCount<shape_msgs::SolidPrimitive::BOX>::value);
-		collision_object.primitives[0].dimensions[shape_msgs::SolidPrimitive::BOX_X] = 0.06;
-		collision_object.primitives[0].dimensions[shape_msgs::SolidPrimitive::BOX_Y] = 0.06;
-		collision_object.primitives[0].dimensions[shape_msgs::SolidPrimitive::BOX_Z] = 0.1;
-		collision_object.primitive_poses.resize(1);
-		collision_object.primitive_poses[0].position = normalPoseRobotFrame.pose.position;
-		collision_object.primitive_poses[0].position.x += 0.03;
-
-		pub_collision_object.publish(collision_object);
-
+		//add table to planning scene
 
 		// remove table
 		collision_object.id = "table";
@@ -304,13 +383,58 @@ public:
 
 		// add table
 		collision_object.operation = moveit_msgs::CollisionObject::ADD;
-		collision_object.primitives[0].dimensions[shape_msgs::SolidPrimitive::BOX_X] = 0.2;
-		collision_object.primitives[0].dimensions[shape_msgs::SolidPrimitive::BOX_Y] = 0.2;
-		collision_object.primitives[0].dimensions[shape_msgs::SolidPrimitive::BOX_Z] = 0.01;
-		collision_object.primitive_poses[0].position = normalPoseRobotFrame.pose.position;
 
-		collision_object.primitive_poses[0].position.z -= 0.05 + 0.005;
+
+		collision_object.meshes.resize(1);
+		collision_object.meshes[0] = detection_call.response.detection.table.convex_hull;
+		collision_object.mesh_poses.resize(1);
+		collision_object.mesh_poses[0] = detection_call.response.detection.table.pose.pose;
+
 		pub_collision_object.publish(collision_object);
+
+		//ROS_DEBUG_STREAM("Table: " << detection_call.response.detection.table);
+
+		ROS_INFO_STREAM("Add clusters");
+
+		//add objects to planning scene
+		for(unsigned int i = 0; i < detection_call.response.detection.clusters.size(); i++){
+
+			sensor_msgs::PointCloud2 pc2;
+			sensor_msgs::convertPointCloudToPointCloud2(detection_call.response.detection.clusters[i],pc2);
+			geometry_msgs::PoseStamped poseStamped;
+			geometry_msgs::Vector3 dimension;
+			getClusterBoundingBox3D(pc2, poseStamped, dimension);
+
+			ostringstream id;
+			id << "object " << i;
+			collision_object.id = id.str().c_str();
+
+			ROS_INFO_STREAM("Object id: " << collision_object.id);
+
+			collision_object.operation = moveit_msgs::CollisionObject::REMOVE;
+
+			pub_collision_object.publish(collision_object);
+
+			collision_object.operation = moveit_msgs::CollisionObject::ADD;
+			collision_object.primitives.resize(1);
+			collision_object.primitives[0].type = shape_msgs::SolidPrimitive::BOX;
+			collision_object.primitives[0].dimensions.resize(shape_tools::SolidPrimitiveDimCount<shape_msgs::SolidPrimitive::BOX>::value);
+			collision_object.primitives[0].dimensions[shape_msgs::SolidPrimitive::BOX_X] = dimension.x;
+			collision_object.primitives[0].dimensions[shape_msgs::SolidPrimitive::BOX_Y] = dimension.y;
+			collision_object.primitives[0].dimensions[shape_msgs::SolidPrimitive::BOX_Z] = dimension.z;
+			collision_object.primitive_poses.resize(1);
+			collision_object.primitive_poses[0] = poseStamped.pose;
+
+
+			pub_collision_object.publish(collision_object);
+
+		}
+
+
+
+*/
+
+
 
 
 		//call object pickup
@@ -318,9 +442,70 @@ public:
 
 		manipulation_msgs::Grasp grasp = generateGrasp();
 
-		group->setSupportSurfaceName("table");
+		//group->setSupportSurfaceName("table");
 
-		group->pick("part", grasp);
+		geometry_msgs::PoseStamped p;
+
+		  p.header.frame_id = KATANA_BASE_LINK;
+		  p.pose.position.x = 0.34916;
+		  p.pose.position.y = 0;
+		  p.pose.position.z = 0.83;
+		  /*
+		  p.pose.orientation.x = 0.706717;
+		  p.pose.orientation.y = 0.000249;
+		  p.pose.orientation.z = 0.707496;
+		  p.pose.orientation.w = 0.000773;
+		  */
+		  p.pose.orientation.x = 0;
+		  p.pose.orientation.y = 0;
+		  p.pose.orientation.z = 0;
+		  p.pose.orientation.w = 1;
+
+
+		  visualization_msgs::Marker marker;
+			marker.pose = p.pose;
+
+			//marker.pose = normalPose.pose;
+			marker.header.frame_id = KATANA_BASE_LINK;
+			marker.id = 7;
+			marker.ns = "grasp";
+			marker.header.stamp = ros::Time::now();
+			marker.action = visualization_msgs::Marker::ADD;
+			marker.lifetime = ros::Duration();
+			marker.type = visualization_msgs::Marker::ARROW;
+			marker.scale.x = 0.05;
+			marker.scale.y = 0.005;
+			marker.scale.z = 0.005;
+			marker.color.r = 0;
+			marker.color.g = 1;
+			marker.color.b = 0;
+			marker.color.a = 1.0;
+			vis_marker_publisher.publish(marker);
+
+		//group->setPoseReferenceFrame(KATANA_BASE_LINK);
+		//group->setRPYTarget();
+		//group->setPositionTarget(p.pose.position.x,p.pose.position.y,p.pose.position.z);
+		//group->setPositionTarget(grasp.grasp_pose.pose.position.x,grasp.grasp_pose.pose.position.y,grasp.grasp_pose.pose.position.z);
+
+		//group->setGoalTolerance(0.8);
+		//group->setOrientationTarget(grasp.grasp_pose.pose.orientation.x, grasp.grasp_pose.pose.orientation.y ,grasp.grasp_pose.pose.orientation.z ,grasp.grasp_pose.pose.orientation.w);
+		//group->setOrientationTarget(p.pose.orientation.x, p.pose.orientation.y ,p.pose.orientation.z ,p.pose.orientation.w);
+		ROS_INFO("Set rpy target to 0,0,0");
+		group->setRPYTarget(0,0,0);
+
+		ROS_INFO_STREAM("End effector link: " << group->getEndEffectorLink());
+		//group->setPoseTarget(p.pose);
+		//group->setPoseTarget(grasp.grasp_pose.pose);
+
+
+
+		group->move();
+		//group->pick("object 4", grasp);
+		//group->pick("object 4");
+
+		std::vector<double> rpy = group->getCurrentRPY("katana_motor5_wrist_roll_link");
+
+		ROS_INFO_STREAM("End effector link: " << rpy.at(0)<< rpy.at(1) << rpy.at(2));
 
 
 		ROS_INFO("Pickup done");
@@ -331,6 +516,28 @@ public:
 
 		return 0;
 
+	}
+
+	void getClusterBoundingBox3D(const sensor_msgs::PointCloud2 &cluster,
+							  geometry_msgs::PoseStamped &pose_stamped,
+							  geometry_msgs::Vector3 &dimensions)
+	{
+	  ROS_INFO("GetClusterBoundingBox3D");
+
+	  object_manipulation_msgs::FindClusterBoundingBox2 srv;
+	  srv.request.cluster = cluster;
+	  if (!cluster_bounding_box2_3d_client_.call(srv.request, srv.response))
+	  {
+	    ROS_ERROR("Failed to call cluster bounding box client");
+	    throw CollisionMapException("Failed to call cluster bounding box client");
+	  }
+	  pose_stamped = srv.response.pose;
+	  dimensions = srv.response.box_dims;
+	  if (dimensions.x == 0.0 && dimensions.y == 0.0 && dimensions.z == 0.0)
+	  {
+	    ROS_ERROR("Cluster bounding box 2 3d client returned an error (0.0 bounding box)");
+	    throw CollisionMapException("Bounding box computation failed");
+	  }
 	}
 
 	manipulation_msgs::Grasp generateGrasp() {
@@ -387,7 +594,9 @@ public:
 		tf::Quaternion q;
 		double roll, pitch, yaw;
 		tf::quaternionMsgToTF(normalPoseRobotFrame.pose.orientation, q);
+
 		tf::Matrix3x3(q).getRPY(roll, pitch, yaw);
+
 
 		//determine yaw which is compatible with the Katana 300 180 kinematics.
 		yaw = atan2(position.getY(),
@@ -404,23 +613,25 @@ public:
 		g.grasp_pose = p;
 
 		g.approach.direction.vector.x = 1.0;
-		g.approach.direction.header.frame_id = "WRIST_JOINT";
+		g.approach.direction.header.frame_id = WRIST_JOINT;
 		g.approach.min_distance = 0.2;
 		g.approach.desired_distance = 0.4;
 
-		g.retreat.direction.header.frame_id = "BASE_FOOTPRINT";
+		g.retreat.direction.header.frame_id = BASE_FOOTPRINT;
 		g.retreat.direction.vector.z = 1.0;
 		g.retreat.min_distance = 0.1;
 		g.retreat.desired_distance = 0.25;
 
-		g.pre_grasp_posture.name.resize(1, "FINGER_JOINT");
+		g.pre_grasp_posture.name.resize(1, FINGER_JOINT);
 		g.pre_grasp_posture.position.resize(1);
 		g.pre_grasp_posture.position[0] = 1;
 
-		g.grasp_posture.name.resize(1, "FINGER_JOINT");
+		g.grasp_posture.name.resize(1, FINGER_JOINT);
 		g.grasp_posture.position.resize(1);
 		g.grasp_posture.position[0] = 0;
 
+
+		ROS_DEBUG_STREAM("Grasp frame id: " << g.grasp_pose.header.frame_id);
 
 		visualization_msgs::Marker marker;
 		marker.pose = g.grasp_pose.pose;
@@ -645,19 +856,19 @@ public:
 
 	int move_arm_out_of_the_way() {
 
-		set_joint_goal();
+		//set_joint_goal();
 
 		//clear_collision_map();
 
 		ROS_INFO("Move arm out of the way.");
 
-		//TODO: use the postures defined in the urdf instead of set_joint_goal();
-		//group->getCurrentState()->getJointStateGroup("arm")->setToDefaultState("home rotated");
 
-		//group->setRandomTarget();
+		//move arm to initial home state as defined in the urdf
+		group->setNamedTarget("home rotated");
+
+
 		//TODO: move doesn't return??
-		//group->move();
-
+		group->asyncMove();
 
 		//clear_collision_map();
 
@@ -736,6 +947,8 @@ public:
 	void receive_cloud_CB(const sensor_msgs::PointCloud2ConstPtr& input_cloud) {
 
 		if (clicked) {
+
+			ROS_INFO("Receive cloud Cb clicked");
 
 			visualization_msgs::Marker marker;
 
@@ -870,8 +1083,11 @@ public:
 
 				qt.normalize();
 
-				//tf::Quaternion qt(marker_axis.cross(axis.normalize()),
-				//		marker_axis.angle(axis.normalize()));
+
+
+				//tf::Quaternion qt2(marker_axis.cross(axis.normalize()),
+					//	marker_axis.angle(axis.normalize()));
+
 
 				/*
 				geometry_msgs::Quaternion quat_msg;
@@ -904,6 +1120,7 @@ public:
 				}
 
 				ROS_DEBUG_STREAM("Pose in Katana base frame: " << normalPoseRobotFrame.pose);
+				ROS_DEBUG_STREAM("Katana base frame frame id: " << normalPoseRobotFrame.header.frame_id);
 
 				marker.pose = normalPoseRobotFrame.pose;
 
