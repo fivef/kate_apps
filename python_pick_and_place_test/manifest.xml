@@ -1,0 +1,17 @@
+<package>
+  <description brief="python_pick_and_place_test">
+
+     python_pick_and_place_test
+
+  </description>
+  <author>sp</author>
+  <license>BSD</license>
+  <review status="unreviewed" notes=""/>
+  <url>http://ros.org/wiki/python_pick_and_place_test</url>
+  <depend package="rospy"/>
+  <depend package="std_msgs"/>
+  <depend package="moveit_commander"/>
+
+</package>
+
+
