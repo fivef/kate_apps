@@ -3,11 +3,14 @@
 PACKAGE='python_pick_and_place_test'
 import roslib
 roslib.load_manifest(PACKAGE)
+from geometry_msgs.msg import PoseStamped
 import rospy
 import sys
 
 from moveit_commander import MoveGroupCommander
 from math import pi
+from tf.transformations import quaternion_from_euler
+
 
 class PickAndPlace():
     # Must have __init__(self) function for a class, similar to a C++ class constructor.
@@ -16,56 +19,42 @@ class PickAndPlace():
         
         #group.set_orientation_tolerance([0.3,0.3,0,3])
         
-        group.set_goal_tolerance(0.001)
+        p = PoseStamped()
+        p.header.frame_id = "/katana_base_link"
+        p.pose.position.x = 0.4287
+        p.pose.position.y = -0.0847
+        p.pose.position.z = 0.4492
+        
+        
+        q = quaternion_from_euler(0, 0, 0)
+        
+        p.pose.orientation.x = q[0]
+        p.pose.orientation.y = q[1]
+        p.pose.orientation.z = q[2]
+        p.pose.orientation.w = q[3]
+        
+
+
         
         print "Planning frame: " ,group.get_planning_frame()
         print "Pose reference frame: ",group.get_pose_reference_frame()
         
-        
-        print "RPy target: 0,0,0"
-        group.set_rpy_target([0,0,0],"katana_motor5_wrist_roll_link")
-        group.go()
-        print "Current rpy: " , group.get_current_rpy("katana_motor5_wrist_roll_link")
-        
-        raw_input()
-        
-        
-        print "RPy target: pi,0,0"
-        group.set_rpy_target([pi,0,0],"katana_motor5_wrist_roll_link")
-        group.go()
-        print "Current rpy: " , group.get_current_rpy("katana_motor5_wrist_roll_link")
-        
-        raw_input()
-        
-        print "RPy target: 0,0,-pi"
-        group.set_rpy_target([0,0,-pi],"katana_motor5_wrist_roll_link")
-        group.go()
-        print "Current rpy: " , group.get_current_rpy("katana_motor5_wrist_roll_link")
-        
-        raw_input()
-        
-        print "RPy target: 0,0,pi"
-        group.set_rpy_target([0,0,pi],"katana_motor5_wrist_roll_link")
-        group.go()
-        print "Current rpy: " , group.get_current_rpy("katana_motor5_wrist_roll_link")
-        
-        raw_input()
-        
-        print "RPy target: 0,pi,0"
-        group.set_rpy_target([0,pi,0],"katana_motor5_wrist_roll_link")
-        group.go()
-        print "Current rpy: " , group.get_current_rpy("katana_motor5_wrist_roll_link")
+       # group.set_pose_reference_frame("katana_base_link")
 
-        
         print "RPy target: 0,0,0"
-        group.set_rpy_target([0,0,0],"katana_motor5_wrist_roll_link")
+        #group.set_rpy_target([0, 0, 0],"katana_gripper_tool_frame")
+        #group.set_position_target([0.16,0,0.40], "katana_gripper_tool_frame")
+        
+        group.set_pose_target(p, "katana_gripper_tool_frame")
+        
         group.go()
         print "Current rpy: " , group.get_current_rpy("katana_motor5_wrist_roll_link")
         
-        raw_input()
         
-        #group.set_position_target([0.35,0.0,0.85])
-        #group.go()
+        
+       
+        
+        
         
 if __name__ == '__main__':
     # Initialize the node and name it.
