@@ -80,7 +80,8 @@ private:
 
 	static const size_t NUM_JOINTS = 5;
 
-	int object_in_gripper;
+
+	double STANDOFF;
 
 	std::string ARM_BASE_LINK;
 
@@ -114,8 +115,7 @@ private:
 
 	std::vector<geometry_msgs::PointStamped> object_positions;
 
-	//only calculate normal once after click
-	int clicked;
+
 
 	//index of the object to pick up
 	int object_to_pick_ind;
@@ -150,6 +150,10 @@ private:
 
 public:
 
+	int object_in_gripper;
+	//only calculate normal once after click
+	int clicked;
+
 	Pick_and_place_app(ros::NodeHandle *_nh) {
 
 		nh = *_nh;
@@ -159,6 +163,9 @@ public:
 
 		nh.param<int>("DIRECTLY_SELECT_GRASP_POSE", DIRECTLY_SELECT_GRASP_POSE,
 				1);
+
+		//the distance between the surface of the object to grasp and the GRIPPER_FRAME origin
+		nh.param<double>("OBJECT_GRIPPER_STANDOFF", STANDOFF, -0.04);
 
 		nh.param<std::string>("ARM_BASE_LINK", ARM_BASE_LINK,
 				"katana_base_link");
@@ -444,63 +451,19 @@ public:
 
 		 }
 
-
-
 		//group->setSupportSurfaceName("table");
 
 		//call object pickup
 		ROS_INFO("Calling the pickup action");
 
-
 		manipulation_msgs::Grasp grasp = generateGrasp();
-
-
-
-
-		//group->setRPYTarget();
-		//group->setPositionTarget(p.pose.position.x,p.pose.position.y,p.pose.position.z);
-		//group->setPositionTarget(grasp.grasp_pose.pose.position.x,grasp.grasp_pose.pose.position.y,grasp.grasp_pose.pose.position.z);
-
-		//group->setGoalTolerance(0.8);
-		//group->setOrientationTarget(grasp.grasp_pose.pose.orientation.x, grasp.grasp_pose.pose.orientation.y ,grasp.grasp_pose.pose.orientation.z ,grasp.grasp_pose.pose.orientation.w);
-		//group->setOrientationTarget(p.pose.orientation.x, p.pose.orientation.y ,p.pose.orientation.z ,p.pose.orientation.w);
-		//ROS_INFO("Set rpy target to 0,0,0");
-		//group->setRPYTarget(0,0,0);
-
-		ROS_INFO_STREAM("End effector link: " << group->getEndEffectorLink());
-		//group->setPoseTarget(p.pose);
-
-		visualization_msgs::Marker marker;
-		marker.pose = grasp.grasp_pose.pose;
-
-		//marker.pose = normalPose.pose;
-		marker.header.frame_id = BASE_LINK;
-		marker.id = 7;
-		marker.ns = "grasp";
-		marker.header.stamp = ros::Time::now();
-		marker.action = visualization_msgs::Marker::ADD;
-		marker.lifetime = ros::Duration();
-		marker.type = visualization_msgs::Marker::ARROW;
-		marker.scale.x = 0.05;
-		marker.scale.y = 0.005;
-		marker.scale.z = 0.005;
-		marker.color.r = 0;
-		marker.color.g = 0.0;
-		marker.color.b = 1.0;
-		marker.color.a = 1.0;
-		vis_marker_publisher.publish(marker);
-
-		group->setPoseTarget(grasp.grasp_pose.pose);
-
-
 
 		std::string object_to_manipulate = nearest_object();
 
-		//group->asyncMove();
 		group->pick(object_to_manipulate, grasp);
-		//group->pick(nearest_object());
 
-		ROS_INFO("Pickup done");
+
+		ROS_INFO("Pick returned!!!!!11111 OMGWTFIT");
 
 		group->place(object_to_manipulate);
 
@@ -509,8 +472,6 @@ public:
 
 		ROS_INFO_STREAM(
 				"End effector link: " << rpy.at(0)<< rpy.at(1) << rpy.at(2));
-
-
 
 		//object_in_gripper = 1;
 
@@ -561,7 +522,7 @@ public:
 		 grasp_joint_state_.effort.push_back(90.0);
 
 		 */
-		const double STANDOFF = 0.01;
+
 
 		tf::Vector3 position;
 		position.setX(normalPoseRobotFrame.pose.position.x);
@@ -633,6 +594,8 @@ public:
 
 
 		ROS_DEBUG_STREAM("Grasp frame id: " << g.grasp_pose.header.frame_id);
+
+		ROS_DEBUG_STREAM("Grasp Pose" << g.grasp_pose.pose);
 
 		visualization_msgs::Marker marker;
 		marker.pose = g.grasp_pose.pose;
@@ -972,7 +935,7 @@ public:
 			try {
 				tf_listener->lookupTransform(input_cloud->header.frame_id,
 						BASE_LINK, ros::Time(0), transformRobotToPointCloud);
-			} catch (tf::TransformException ex) {
+			} catch (tf::TransformException& ex) {
 				ROS_ERROR("%s", ex.what());
 			}
 
@@ -985,7 +948,7 @@ public:
 			searchPoint.y = searchPointPointCloudFrame.getY();
 			searchPoint.z = searchPointPointCloudFrame.getZ();
 
-			float radius = 0.005;
+			float radius = 0.02;
 
 			ROS_INFO(
 					"Search searchPointWorldFrame set to: x: %f, y: %f, z: %f ", searchPoint.x, searchPoint.y, searchPoint.z);
@@ -1110,8 +1073,7 @@ public:
 
 				}
 
-				ROS_DEBUG_STREAM(
-						"Pose in base link frame: " << normalPoseRobotFrame.pose);
+
 				ROS_DEBUG_STREAM(
 						"base link frame frame id: " << normalPoseRobotFrame.header.frame_id);
 
@@ -1134,24 +1096,17 @@ public:
 				marker.color.a = 1.0;
 				vis_marker_publisher.publish(marker);
 
-				ROS_DEBUG_STREAM("Normal marker published ");
+
+				ROS_DEBUG_STREAM("Nomal pose in base link frame: " << normalPoseRobotFrame.pose);
+
+				pickup();
 
 			}else{
 
-				ROS_ERROR("Radius search failed!");
-
-				return;
+				ROS_ERROR("Normal:No Points found inside search radius! Search radios too small?");
 
 			}
 
-
-
-			if (object_in_gripper) {
-				ROS_DEBUG("Object in gripper, place is called");
-				place();
-			} else {
-				pickup();
-			}
 
 		}
 	}
@@ -1228,6 +1183,7 @@ int main(int argc, char **argv) {
 			&Pick_and_place_app::receive_clicked_point_CB, app);
 
 	ros::spin();
+
 
 	return 0;
 }
