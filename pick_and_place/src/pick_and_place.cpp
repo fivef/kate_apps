@@ -12,6 +12,8 @@
 #include <math.h>
 #include <sstream>
 
+#include <ros/callback_queue.h>
+
 #include <object_manipulation_msgs/FindClusterBoundingBox2.h>
 #include <tabletop_object_detector/TabletopDetection.h>
 #include "/home/sp/groovy_rosbuild_workspace/overlay/tabletop_collision_map_processing/srv_gen/cpp/include/tabletop_collision_map_processing/TabletopCollisionMapProcessing.h"
@@ -468,13 +470,16 @@ public:
 
 		ROS_INFO("Pick returned!!!!!11111 OMGWTFIT");
 
-		group->place(object_to_manipulate);
+		//group->place(object_to_manipulate);
 
 		std::vector<double> rpy = group->getCurrentRPY(
 				group->getEndEffectorLink());
 
 		ROS_INFO_STREAM(
 				"End effector link: " << rpy.at(0)<< rpy.at(1) << rpy.at(2));
+
+
+		group->place(object_to_manipulate);
 
 		//object_in_gripper = 1;
 
@@ -874,6 +879,12 @@ public:
 
 		clicked = true;
 
+		ROS_INFO("Clicked!!!!");
+
+		determine_normal_of_point_cloud_at_clicked_point();
+
+		pickup();
+
 	}
 
 	bool determine_normal_of_point_cloud_at_clicked_point() {
@@ -1138,9 +1149,11 @@ int main(int argc, char **argv) {
 
 	ros::NodeHandle nh;
 
+	ros::CallbackQueue clicks_queue;
+
 	Pick_and_place_app *app = new Pick_and_place_app(&nh);
 
-	ROS_INFO("Subscripe point cloud and clicked_point");
+
 
 	// Create a ROS subscriber for the input point cloud
 
@@ -1150,21 +1163,29 @@ int main(int argc, char **argv) {
 
 	/*
 	ros::Subscriber point_cloud_subscriber = nh.subscribe(ros::SubscribeOptions::create("/kinect/depth_registered/points", 1,
-			&Pick_and_place_app::receive_cloud_CB, app));
+			&Pick_and_place_app::receive_cloud_CB, app, clicks_queue));
 	*/
-
+	/*
 	ros::Subscriber rviz_click_subscriber = nh.subscribe("/clicked_point", 1,
 			&Pick_and_place_app::receive_clicked_point_CB, app);
+	*/
 
+	//Async Queue for Clicks_queue, because the moveit functions like pickup, move don't return in synchronous callbacks
+	ros::SubscribeOptions options = ros::SubscribeOptions::create<geometry_msgs::PointStamped>("/clicked_point", 1, boost::bind(&Pick_and_place_app::receive_clicked_point_CB, app, _1)
+			, ros::VoidPtr(), &clicks_queue);
+
+	ros::Subscriber rviz_click_subscriber = nh.subscribe(options);
+
+	ROS_INFO("Subscriped to point cloud and clicked_point");
+
+	ROS_INFO("Pick and Place v 0.1 ready to take commands.");
+
+	/*
 	ros::Rate r(1000);
 	while (ros::ok())
 	{
 		if(app->clicked){
-			ROS_INFO("Clicked was true in main!!!!");
 
-			app->determine_normal_of_point_cloud_at_clicked_point();
-
-			app->pickup();
 		}
 
 		//ros::spinOnce();                   // Handle ROS events
@@ -1172,11 +1193,14 @@ int main(int argc, char **argv) {
 		spinner.start();
 		r.sleep();
 	}
+	*/
 
-	//ros::AsyncSpinner spinner(1);
-	//spinner.start();
+	//Async Spinner for Clicks_queue, because the moveit functions like pickup, move don't return in synchronous callbacks
+	ros::AsyncSpinner spinner(0, &clicks_queue);
+	spinner.start();
 
-	//ros::spin();
+
+	ros::spin();
 
 	return 0;
 }
