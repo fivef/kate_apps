@@ -80,7 +80,6 @@ private:
 
 	static const size_t NUM_JOINTS = 5;
 
-
 	double STANDOFF;
 
 	std::string ARM_BASE_LINK;
@@ -99,6 +98,8 @@ private:
 
 	geometry_msgs::PointStamped desired_pickup_point;
 
+	pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_input_point_cloud;
+
 	int running;
 
 	ros::Publisher vis_marker_publisher;
@@ -114,8 +115,6 @@ private:
 	ros::Publisher pub_collision_object;
 
 	std::vector<geometry_msgs::PointStamped> object_positions;
-
-
 
 	//index of the object to pick up
 	int object_to_pick_ind;
@@ -182,6 +181,10 @@ public:
 
 		object_in_gripper = 0;
 
+		pcl_input_point_cloud = pcl::PointCloud<pcl::PointXYZ>::Ptr(new pcl::PointCloud<pcl::PointXYZ>());
+
+		//pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
+
 		// create TF listener
 		tf_listener = new tf::TransformListener();
 
@@ -244,11 +247,8 @@ public:
 
 		set_kinect_ptu("kurtana_pitch_joint", 0.75);
 
-
-
 		ROS_INFO("Kinect lined up.");
 
-		//TODO: only move arm out of the way in gazebo simulation because the real robot already is in init position
 		move_arm_out_of_the_way();
 
 	}
@@ -263,7 +263,6 @@ public:
 	void set_pickup_point(geometry_msgs::PointStamped point_) {
 
 		desired_pickup_point = point_;
-
 
 		ROS_INFO_STREAM(
 				"Pickup Point set to: " << desired_pickup_point.point.x << " " << desired_pickup_point.point.y << " " << desired_pickup_point.point.z);
@@ -344,42 +343,42 @@ public:
 		 pickup_point.point.z = desired_pickup_point.z;
 		 */
 
-		 // ----- call the tabletop detection
-		 ROS_INFO("Calling tabletop detector");
-		 tabletop_object_detector::TabletopDetection detection_call;
-		 //we want recognized database objects returned
-		 //set this to false if you are using the pipeline without the database
-		 detection_call.request.return_models = false;
+		// ----- call the tabletop detection
+		ROS_INFO("Calling tabletop detector");
+		tabletop_object_detector::TabletopDetection detection_call;
+		//we want recognized database objects returned
+		//set this to false if you are using the pipeline without the database
+		detection_call.request.return_models = false;
 
-		 //we want the individual object point clouds returned as well
-		 detection_call.request.return_clusters = true;
+		//we want the individual object point clouds returned as well
+		detection_call.request.return_clusters = true;
 
-		 if (!object_detection_srv.call(detection_call)) {
-		 ROS_ERROR("Tabletop detection service failed");
-		 return -1;
-		 }
-		 if (detection_call.response.detection.result
-		 != detection_call.response.detection.SUCCESS) {
-		 ROS_ERROR(
-		 "Tabletop detection returned error code %d", detection_call.response.detection.result);
-		 return -1;
-		 }
-		 if (detection_call.response.detection.clusters.empty()
-		 && detection_call.response.detection.models.empty()) {
-		 ROS_ERROR(
-		 "The tabletop detector detected the table, but found no objects");
-		 return -1;
-		 }
+		if (!object_detection_srv.call(detection_call)) {
+			ROS_ERROR("Tabletop detection service failed");
+			return -1;
+		}
+		if (detection_call.response.detection.result
+				!= detection_call.response.detection.SUCCESS) {
+			ROS_ERROR(
+					"Tabletop detection returned error code %d", detection_call.response.detection.result);
+			return -1;
+		}
+		if (detection_call.response.detection.clusters.empty()
+				&& detection_call.response.detection.models.empty()) {
+			ROS_ERROR(
+					"The tabletop detector detected the table, but found no objects");
+			return -1;
+		}
 
+		ROS_INFO("Add table to planning scene");
 
-		 ROS_INFO("Add table to planning scene");
+		moveit_msgs::CollisionObject collision_object;
 
-		 moveit_msgs::CollisionObject collision_object;
+		collision_object.header.stamp = ros::Time::now();
+		collision_object.header.frame_id =
+				detection_call.response.detection.table.pose.header.frame_id;
 
-		 collision_object.header.stamp = ros::Time::now();
-		 collision_object.header.frame_id = detection_call.response.detection.table.pose.header.frame_id;
-
-		 /*
+		/*
 
 		 ROS_INFO_STREAM("Collision Object frame: " << detection_call.response.detection.table.pose.header.frame_id);
 
@@ -402,54 +401,59 @@ public:
 		 pub_collision_object.publish(collision_object);
 
 		 //ROS_DEBUG_STREAM("Table: " << detection_call.response.detection.table);
-*/
+		 */
 
+		ROS_INFO_STREAM("Add clusters");
 
-		 ROS_INFO_STREAM("Add clusters");
+		object_positions.clear();
 
+		//add objects to planning scene
+		for (unsigned int i = 0;
+				i < detection_call.response.detection.clusters.size(); i++) {
 
-		 object_positions.clear();
+			sensor_msgs::PointCloud2 pc2;
+			sensor_msgs::convertPointCloudToPointCloud2(
+					detection_call.response.detection.clusters[i], pc2);
+			geometry_msgs::PoseStamped poseStamped;
+			geometry_msgs::Vector3 dimension;
+			getClusterBoundingBox3D(pc2, poseStamped, dimension);
 
-		 //add objects to planning scene
-		 for(unsigned int i = 0; i < detection_call.response.detection.clusters.size(); i++){
+			geometry_msgs::PointStamped point;
 
-			 sensor_msgs::PointCloud2 pc2;
-			 sensor_msgs::convertPointCloudToPointCloud2(detection_call.response.detection.clusters[i],pc2);
-			 geometry_msgs::PoseStamped poseStamped;
-			 geometry_msgs::Vector3 dimension;
-			 getClusterBoundingBox3D(pc2, poseStamped, dimension);
+			point.header.frame_id = poseStamped.header.frame_id;
+			point.point = poseStamped.pose.position;
 
-			 geometry_msgs::PointStamped point;
+			object_positions.push_back(point);
 
-			 point.header.frame_id = poseStamped.header.frame_id;
-			 point.point = poseStamped.pose.position;
+			ostringstream id;
+			id << "object " << i;
+			collision_object.id = id.str().c_str();
 
-			 object_positions.push_back(point);
+			ROS_INFO_STREAM("Object id: " << collision_object.id);
 
-			 ostringstream id;
-			 id << "object " << i;
-			 collision_object.id = id.str().c_str();
+			collision_object.operation = moveit_msgs::CollisionObject::REMOVE;
 
-			 ROS_INFO_STREAM("Object id: " << collision_object.id);
+			pub_collision_object.publish(collision_object);
 
-			 collision_object.operation = moveit_msgs::CollisionObject::REMOVE;
+			collision_object.operation = moveit_msgs::CollisionObject::ADD;
+			collision_object.primitives.resize(1);
+			collision_object.primitives[0].type =
+					shape_msgs::SolidPrimitive::BOX;
+			collision_object.primitives[0].dimensions.resize(
+					shape_tools::SolidPrimitiveDimCount<
+							shape_msgs::SolidPrimitive::BOX>::value);
+			collision_object.primitives[0].dimensions[shape_msgs::SolidPrimitive::BOX_X] =
+					dimension.x;
+			collision_object.primitives[0].dimensions[shape_msgs::SolidPrimitive::BOX_Y] =
+					dimension.y;
+			collision_object.primitives[0].dimensions[shape_msgs::SolidPrimitive::BOX_Z] =
+					dimension.z;
+			collision_object.primitive_poses.resize(1);
+			collision_object.primitive_poses[0] = poseStamped.pose;
 
-			 pub_collision_object.publish(collision_object);
+			pub_collision_object.publish(collision_object);
 
-			 collision_object.operation = moveit_msgs::CollisionObject::ADD;
-			 collision_object.primitives.resize(1);
-			 collision_object.primitives[0].type = shape_msgs::SolidPrimitive::BOX;
-			 collision_object.primitives[0].dimensions.resize(shape_tools::SolidPrimitiveDimCount<shape_msgs::SolidPrimitive::BOX>::value);
-			 collision_object.primitives[0].dimensions[shape_msgs::SolidPrimitive::BOX_X] = dimension.x;
-			 collision_object.primitives[0].dimensions[shape_msgs::SolidPrimitive::BOX_Y] = dimension.y;
-			 collision_object.primitives[0].dimensions[shape_msgs::SolidPrimitive::BOX_Z] = dimension.z;
-			 collision_object.primitive_poses.resize(1);
-			 collision_object.primitive_poses[0] = poseStamped.pose;
-
-
-			 pub_collision_object.publish(collision_object);
-
-		 }
+		}
 
 		//group->setSupportSurfaceName("table");
 
@@ -461,7 +465,6 @@ public:
 		std::string object_to_manipulate = nearest_object();
 
 		group->pick(object_to_manipulate, grasp);
-
 
 		ROS_INFO("Pick returned!!!!!11111 OMGWTFIT");
 
@@ -522,7 +525,6 @@ public:
 		 grasp_joint_state_.effort.push_back(90.0);
 
 		 */
-
 
 		tf::Vector3 position;
 		position.setX(normalPoseRobotFrame.pose.position.x);
@@ -590,8 +592,6 @@ public:
 		g.grasp_posture.name[0] = FINGER_JOINT;
 		g.grasp_posture.position.resize(1);
 		g.grasp_posture.position[0] = -0.44;
-
-
 
 		ROS_DEBUG_STREAM("Grasp frame id: " << g.grasp_pose.header.frame_id);
 
@@ -829,12 +829,9 @@ public:
 		//move arm to initial home state as defined in the urdf
 		group->setNamedTarget("home rotated");
 
-		//TODO: move doesn't return??
 		group->asyncMove();
 
 		//clear_collision_map();
-
-		//Todo: check if worked
 
 		ROS_INFO("Arm moved out of the way.");
 
@@ -860,309 +857,280 @@ public:
 
 	}
 
-	/**
-	 * return nearest object to point
-	 */
 	void receive_clicked_point_CB(
 			const geometry_msgs::PointStamped::ConstPtr& msg) {
 		ROS_INFO(
 				"Point received: x: %f, y: %f, z: %f ", msg->point.x, msg->point.y, msg->point.z);
 
-		//Throw away old received clicked points
-		if ((ros::Time::now().sec - msg->header.stamp.sec)
-				> message_receive_dead_time_in_sec) {
-			return;
-		}
+		/*
+		 //Throw away old received clicked points
+		 if ((ros::Time::now().sec - msg->header.stamp.sec)
+		 > message_receive_dead_time_in_sec) {
+		 return;
+		 }
+		 */
 
 		set_pickup_point(*msg);
 
 		clicked = true;
 
-		visualization_msgs::Marker marker;
-
-		/*
-		 marker.pose.position.x = msg->point.x;
-		 marker.pose.position.y = msg->point.y;
-		 marker.pose.position.z = msg->point.z;
-
-		 marker.header.frame_id = msg->header.frame_id;
-		 marker.id = 0;
-		 marker.ns = "selection";
-		 marker.header.stamp = ros::Time::now();
-		 marker.action = visualization_msgs::Marker::ADD;
-		 marker.lifetime = ros::Duration();
-		 marker.type = visualization_msgs::Marker::SPHERE;
-		 marker.scale.x = 0.01;
-		 marker.scale.y = 0.01;
-		 marker.scale.z = 0.01;
-		 marker.color.r = 1;
-		 marker.color.g = 0;
-		 marker.color.b = 0;
-		 marker.color.a = 1.0;
-		 vis_marker_publisher.publish(marker);
-		 */
-
 	}
 
-	void receive_cloud_CB(const sensor_msgs::PointCloud2ConstPtr& input_cloud) {
+	bool determine_normal_of_point_cloud_at_clicked_point() {
+		visualization_msgs::Marker marker;
 
-		if (clicked) {
+		pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
+		kdtree.setInputCloud(pcl_input_point_cloud);
 
-			clicked = false;
+		//transform selected point from robot frame (BASE_LINK) to Kinect frame (/kinect_rgb_optical_frame)
+		tf::Stamped<tf::Vector3> searchPointInRobotFrame;
 
-			ROS_INFO("Receive cloud Cb clicked");
+		tf::pointStampedMsgToTF(desired_pickup_point, searchPointInRobotFrame);
 
-			visualization_msgs::Marker marker;
+		tf::StampedTransform transformRobotToPointCloud;
 
-			pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(
-					new pcl::PointCloud<pcl::PointXYZ>);
+		try {
+			tf_listener->lookupTransform(pcl_input_point_cloud->header.frame_id,
+					BASE_LINK, ros::Time(0), transformRobotToPointCloud);
+		} catch (tf::TransformException& ex) {
+			ROS_ERROR("%s", ex.what());
+		}
 
-			//pcl::PointCloud<pcl::PointXYZ> *cloud = new pcl::PointCloud<pcl::PointXYZ>();
+		tf::Vector3 searchPointPointCloudFrame = transformRobotToPointCloud
+				* searchPointInRobotFrame;
 
-			pcl::fromROSMsg(*input_cloud, *cloud);
+		pcl::PointXYZ searchPoint;
 
-			pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
-			kdtree.setInputCloud(cloud);
+		searchPoint.x = searchPointPointCloudFrame.getX();
+		searchPoint.y = searchPointPointCloudFrame.getY();
+		searchPoint.z = searchPointPointCloudFrame.getZ();
 
-			//transform selected point from robot frame (BASE_LINK) to Kinect frame (/kinect_rgb_optical_frame)
-			tf::Stamped<tf::Vector3> searchPointInRobotFrame;
+		float radius = 0.02;
 
-			tf::pointStampedMsgToTF(desired_pickup_point, searchPointInRobotFrame);
+		ROS_INFO(
+				"Search searchPointWorldFrame set to: x: %f, y: %f, z: %f ", searchPoint.x, searchPoint.y, searchPoint.z);
 
+		// Neighbors within radius search
 
-			tf::StampedTransform transformRobotToPointCloud;
+		std::vector<int> pointIdxRadiusSearch;
+		std::vector<float> pointRadiusSquaredDistance;
 
-			try {
-				tf_listener->lookupTransform(input_cloud->header.frame_id,
-						BASE_LINK, ros::Time(0), transformRobotToPointCloud);
-			} catch (tf::TransformException& ex) {
-				ROS_ERROR("%s", ex.what());
-			}
+		ROS_DEBUG_STREAM(
+				"Input cloud frame id: " << pcl_input_point_cloud->header.frame_id);
 
-			tf::Vector3 searchPointPointCloudFrame = transformRobotToPointCloud
-					* searchPointInRobotFrame;
+		if (kdtree.radiusSearch(searchPoint, radius, pointIdxRadiusSearch,
+				pointRadiusSquaredDistance) > 5) {
+			for (size_t i = 0; i < pointIdxRadiusSearch.size(); ++i) {
+				//ROS_DEBUG_STREAM(
+				//		"   " << cloud->points[pointIdxRadiusSearch[i]].x << " " << cloud->points[pointIdxRadiusSearch[i]].y << " " << cloud->points[pointIdxRadiusSearch[i]].z << " (squared distance: " << pointRadiusSquaredDistance[i] << ")" << std::endl);
 
-			pcl::PointXYZ searchPoint;
+				marker.pose.position.x =
+						pcl_input_point_cloud->points[pointIdxRadiusSearch[i]].x;
+				marker.pose.position.y =
+						pcl_input_point_cloud->points[pointIdxRadiusSearch[i]].y;
+				marker.pose.position.z =
+						pcl_input_point_cloud->points[pointIdxRadiusSearch[i]].z;
 
-			searchPoint.x = searchPointPointCloudFrame.getX();
-			searchPoint.y = searchPointPointCloudFrame.getY();
-			searchPoint.z = searchPointPointCloudFrame.getZ();
-
-			float radius = 0.02;
-
-			ROS_INFO(
-					"Search searchPointWorldFrame set to: x: %f, y: %f, z: %f ", searchPoint.x, searchPoint.y, searchPoint.z);
-
-			// Neighbors within radius search
-
-			std::vector<int> pointIdxRadiusSearch;
-			std::vector<float> pointRadiusSquaredDistance;
-
-			ROS_DEBUG_STREAM(
-					"Input cloud frame id: " << input_cloud->header.frame_id);
-
-			if (kdtree.radiusSearch(searchPoint, radius, pointIdxRadiusSearch,
-					pointRadiusSquaredDistance) > 5) {
-				for (size_t i = 0; i < pointIdxRadiusSearch.size(); ++i) {
-					//ROS_DEBUG_STREAM(
-					//		"   " << cloud->points[pointIdxRadiusSearch[i]].x << " " << cloud->points[pointIdxRadiusSearch[i]].y << " " << cloud->points[pointIdxRadiusSearch[i]].z << " (squared distance: " << pointRadiusSquaredDistance[i] << ")" << std::endl);
-
-					marker.pose.position.x =
-							cloud->points[pointIdxRadiusSearch[i]].x;
-					marker.pose.position.y =
-							cloud->points[pointIdxRadiusSearch[i]].y;
-					marker.pose.position.z =
-							cloud->points[pointIdxRadiusSearch[i]].z;
-
-					//show markers in kinect frame
-					marker.header.frame_id = input_cloud->header.frame_id;
-					marker.id = i;
-					marker.ns = "selection";
-					marker.header.stamp = ros::Time::now();
-					marker.action = visualization_msgs::Marker::ADD;
-					marker.lifetime = ros::Duration();
-					marker.type = visualization_msgs::Marker::SPHERE;
-					marker.scale.x = 0.003;
-					marker.scale.y = 0.003;
-					marker.scale.z = 0.003;
-					marker.color.r = 1;
-					marker.color.g = 0;
-					marker.color.b = 0;
-					marker.color.a = 1.0;
-					vis_marker_publisher.publish(marker);
-
-				}
-
-				ROS_INFO_STREAM(
-						"Number of points in radius: " << pointIdxRadiusSearch.size());
-
-				//Determine Normal from points in radius
-
-				Eigen::Vector4f plane_parameters;
-
-				float curvature;
-
-				pcl::NormalEstimation<pcl::PointXYZ, pcl::Normal> normalEstimator;
-
-				normalEstimator.computePointNormal(*cloud, pointIdxRadiusSearch,
-						plane_parameters, curvature);
-
-				normal.getVector4fMap() = plane_parameters;
-
-				ROS_INFO(
-						"Normal: x: %f, y: %f, z: %f ", normal.x, normal.y, normal.z);
-				ROS_DEBUG_STREAM("Normal: " << normal);
-
-				/*
-				 tf::Vector3 normalTF(normal.x, normal.y, normal.z);
-
-				 normalTF = transformWorldToPointCloud.inverse() * normalTF;
-				 */
-				geometry_msgs::PoseStamped normalPosePointCloudFrame;
-
-				normalPosePointCloudFrame.header.frame_id =
-						input_cloud->header.frame_id;
-
-				normalPosePointCloudFrame.pose.position.x = searchPoint.x;
-				normalPosePointCloudFrame.pose.position.y = searchPoint.y;
-				normalPosePointCloudFrame.pose.position.z = searchPoint.z;
-
-				//determine orientation of normal for marker
-
-				btVector3 axis(normal.x, normal.y, normal.z);
-				//tf::Vector3 axis(normal.x, normal.y, normal.z);
-
-				btVector3 marker_axis(1, 0, 0);
-				//tf::Vector3 marker_axis(1,0,0);
-
-				btQuaternion qt(marker_axis.cross(axis.normalize()),
-						marker_axis.angle(axis.normalize()));
-
-				qt.normalize();
-
-				//tf::Quaternion qt2(marker_axis.cross(axis.normalize()),
-				//	marker_axis.angle(axis.normalize()));
-
-				/*
-				 geometry_msgs::Quaternion quat_msg;
-				 tf::quaternionTFToMsg(qt, quat_msg);
-				 normalPosePointCloudFrame.pose.orientation = quat_msg;
-				 */
-
-				normalPosePointCloudFrame.pose.orientation.x = qt.getX();
-				normalPosePointCloudFrame.pose.orientation.y = qt.getY();
-				normalPosePointCloudFrame.pose.orientation.z = qt.getZ();
-				normalPosePointCloudFrame.pose.orientation.w = qt.getW();
-
-				ROS_DEBUG_STREAM(
-						"Pose in Point Cloud Frame: " << normalPosePointCloudFrame.pose);
-
-				//transform normal pose to Katana base
-
-				try {
-					//todo: set back to katana base link for arc tan calc?
-					tf_listener->transformPose(BASE_LINK,
-							normalPosePointCloudFrame, normalPoseRobotFrame);
-				} catch (const tf::TransformException &ex) {
-
-					ROS_ERROR("%s", ex.what());
-
-				} catch (const std::exception &ex) {
-
-					ROS_ERROR("%s", ex.what());
-
-				}
-
-
-				ROS_DEBUG_STREAM(
-						"base link frame frame id: " << normalPoseRobotFrame.header.frame_id);
-
-				marker.pose = normalPoseRobotFrame.pose;
-
-				//marker.pose = normalPose.pose;
-				marker.header.frame_id = BASE_LINK;
-				marker.id = 12345;
-				marker.ns = "normal";
+				//show markers in kinect frame
+				marker.header.frame_id = pcl_input_point_cloud->header.frame_id;
+				marker.id = i;
+				marker.ns = "selection";
 				marker.header.stamp = ros::Time::now();
 				marker.action = visualization_msgs::Marker::ADD;
 				marker.lifetime = ros::Duration();
-				marker.type = visualization_msgs::Marker::ARROW;
-				marker.scale.x = 0.05;
-				marker.scale.y = 0.005;
-				marker.scale.z = 0.005;
+				marker.type = visualization_msgs::Marker::SPHERE;
+				marker.scale.x = 0.003;
+				marker.scale.y = 0.003;
+				marker.scale.z = 0.003;
 				marker.color.r = 1;
 				marker.color.g = 0;
 				marker.color.b = 0;
 				marker.color.a = 1.0;
 				vis_marker_publisher.publish(marker);
 
+			}
 
-				ROS_DEBUG_STREAM("Nomal pose in base link frame: " << normalPoseRobotFrame.pose);
+			ROS_INFO_STREAM(
+					"Number of points in radius: " << pointIdxRadiusSearch.size());
 
-				pickup();
+			//Determine Normal from points in radius
 
-			}else{
+			Eigen::Vector4f plane_parameters;
 
-				ROS_ERROR("Normal:No Points found inside search radius! Search radios too small?");
+			float curvature;
+
+			pcl::NormalEstimation<pcl::PointXYZ, pcl::Normal> normalEstimator;
+
+			normalEstimator.computePointNormal(*pcl_input_point_cloud,
+					pointIdxRadiusSearch, plane_parameters, curvature);
+
+			normal.getVector4fMap() = plane_parameters;
+
+			ROS_INFO(
+					"Normal: x: %f, y: %f, z: %f ", normal.x, normal.y, normal.z);
+			ROS_DEBUG_STREAM("Normal: " << normal);
+
+			/*
+			 tf::Vector3 normalTF(normal.x, normal.y, normal.z);
+
+			 normalTF = transformWorldToPointCloud.inverse() * normalTF;
+			 */
+			geometry_msgs::PoseStamped normalPosePointCloudFrame;
+
+			normalPosePointCloudFrame.header.frame_id =
+					pcl_input_point_cloud->header.frame_id;
+
+			normalPosePointCloudFrame.pose.position.x = searchPoint.x;
+			normalPosePointCloudFrame.pose.position.y = searchPoint.y;
+			normalPosePointCloudFrame.pose.position.z = searchPoint.z;
+
+			//determine orientation of normal for marker
+
+			btVector3 axis(normal.x, normal.y, normal.z);
+			//tf::Vector3 axis(normal.x, normal.y, normal.z);
+
+			btVector3 marker_axis(1, 0, 0);
+			//tf::Vector3 marker_axis(1,0,0);
+
+			btQuaternion qt(marker_axis.cross(axis.normalize()),
+					marker_axis.angle(axis.normalize()));
+
+			qt.normalize();
+
+			//tf::Quaternion qt2(marker_axis.cross(axis.normalize()),
+			//	marker_axis.angle(axis.normalize()));
+
+			/*
+			 geometry_msgs::Quaternion quat_msg;
+			 tf::quaternionTFToMsg(qt, quat_msg);
+			 normalPosePointCloudFrame.pose.orientation = quat_msg;
+			 */
+
+			normalPosePointCloudFrame.pose.orientation.x = qt.getX();
+			normalPosePointCloudFrame.pose.orientation.y = qt.getY();
+			normalPosePointCloudFrame.pose.orientation.z = qt.getZ();
+			normalPosePointCloudFrame.pose.orientation.w = qt.getW();
+
+			ROS_DEBUG_STREAM(
+					"Pose in Point Cloud Frame: " << normalPosePointCloudFrame.pose);
+
+			//transform normal pose to Katana base
+
+			try {
+				tf_listener->transformPose(BASE_LINK, normalPosePointCloudFrame,
+						normalPoseRobotFrame);
+			} catch (const tf::TransformException &ex) {
+
+				ROS_ERROR("%s", ex.what());
+
+			} catch (const std::exception &ex) {
+
+				ROS_ERROR("%s", ex.what());
 
 			}
 
+			ROS_DEBUG_STREAM(
+					"base link frame frame id: " << normalPoseRobotFrame.header.frame_id);
+
+			marker.pose = normalPoseRobotFrame.pose;
+
+			//marker.pose = normalPose.pose;
+			marker.header.frame_id = BASE_LINK;
+			marker.id = 12345;
+			marker.ns = "normal";
+			marker.header.stamp = ros::Time::now();
+			marker.action = visualization_msgs::Marker::ADD;
+			marker.lifetime = ros::Duration();
+			marker.type = visualization_msgs::Marker::ARROW;
+			marker.scale.x = 0.05;
+			marker.scale.y = 0.005;
+			marker.scale.z = 0.005;
+			marker.color.r = 1;
+			marker.color.g = 0;
+			marker.color.b = 0;
+			marker.color.a = 1.0;
+			vis_marker_publisher.publish(marker);
+
+			ROS_DEBUG_STREAM(
+					"Nomal pose in base link frame: " << normalPoseRobotFrame.pose);
+
+			return true;
+
+		} else {
+
+			ROS_ERROR(
+					"Normal:No Points found inside search radius! Search radios too small?");
+			return false;
 
 		}
+
 	}
 
+	void receive_cloud_CB(
+			const sensor_msgs::PointCloud2ConstPtr& ros_input_cloud) {
 
-	 string nearest_object() {
+		//if (clicked) {
+			//clicked = false;
+			//ROS_INFO("Received point cloud");
+			pcl::fromROSMsg(*ros_input_cloud, *pcl_input_point_cloud);
+		//}
 
-	 //uses object_positions, desired_pickup_point
+	}
 
-	 geometry_msgs::PointStamped point;
+	string nearest_object() {
 
-	 // convert point to base_link frame
-	 tf_listener->transformPoint("/base_link", desired_pickup_point, point);
+		//uses object_positions, desired_pickup_point
 
-	 ROS_DEBUG_STREAM(
-	 "Pickup Point test which object is nearest: " << point.point.x << " " << point.point.y << " " << point.point.z);
+		geometry_msgs::PointStamped point;
 
-	 // find the closest object
-	 double nearest_dist = 1e6;
-	 int nearest_object_ind = -1;
+		// convert point to base_link frame
+		tf_listener->transformPoint("/base_link", desired_pickup_point, point);
 
-	 for (size_t i = 0; i < object_positions.size(); ++i) {
-		 geometry_msgs::PointStamped object_position_in_base_link_frame;
-	 tf_listener->transformPoint("/base_link", object_positions[i],
-			 object_position_in_base_link_frame);
+		ROS_DEBUG_STREAM(
+				"Pickup Point test which object is nearest: " << point.point.x << " " << point.point.y << " " << point.point.z);
 
-	 double dist = sqrt(
-	 pow(object_position_in_base_link_frame.point.x - point.point.x, 2.0) + pow(object_position_in_base_link_frame.point.y - point.point.y, 2.0)
-	 + pow(object_position_in_base_link_frame.point.z - point.point.z, 2.0));
-	 if (dist < nearest_dist) {
-	 nearest_dist = dist;
-	 nearest_object_ind = i;
-	 }
-	 }
+		// find the closest object
+		double nearest_dist = 1e6;
+		int nearest_object_ind = -1;
 
-	 if (nearest_object_ind > -1) {
-	 ROS_INFO(
-	 "nearest object ind: %d (distance: %f)", nearest_object_ind, nearest_dist);
+		for (size_t i = 0; i < object_positions.size(); ++i) {
+			geometry_msgs::PointStamped object_position_in_base_link_frame;
+			tf_listener->transformPoint("/base_link", object_positions[i],
+					object_position_in_base_link_frame);
 
-	 ostringstream id;
-	 id << "object " << nearest_object_ind;
+			double dist = sqrt(
+					pow(
+							object_position_in_base_link_frame.point.x
+									- point.point.x, 2.0)
+							+ pow(
+									object_position_in_base_link_frame.point.y
+											- point.point.y, 2.0)
+							+ pow(
+									object_position_in_base_link_frame.point.z
+											- point.point.z, 2.0));
+			if (dist < nearest_dist) {
+				nearest_dist = dist;
+				nearest_object_ind = i;
+			}
+		}
 
-	 return id.str().c_str();
+		if (nearest_object_ind > -1) {
+			ROS_INFO(
+					"nearest object ind: %d (distance: %f)", nearest_object_ind, nearest_dist);
 
-	 } else {
-	 ROS_ERROR("No nearby objects. Unable to select grasp target");
-	 return "";
-	 }
+			ostringstream id;
+			id << "object " << nearest_object_ind;
 
+			return id.str().c_str();
 
-	 }
+		} else {
+			ROS_ERROR("No nearby objects. Unable to select grasp target");
+			return "";
+		}
 
+	}
 
 };
-
-
 
 int main(int argc, char **argv) {
 	//initialize the ROS node
@@ -1175,15 +1143,40 @@ int main(int argc, char **argv) {
 	ROS_INFO("Subscripe point cloud and clicked_point");
 
 	// Create a ROS subscriber for the input point cloud
+
 	ros::Subscriber point_cloud_subscriber = nh.subscribe(
 			"/kinect/depth_registered/points", 1,
 			&Pick_and_place_app::receive_cloud_CB, app);
 
-	ros::Subscriber rviz_click_subscriber = nh.subscribe("/clicked_point", 1000,
+	/*
+	ros::Subscriber point_cloud_subscriber = nh.subscribe(ros::SubscribeOptions::create("/kinect/depth_registered/points", 1,
+			&Pick_and_place_app::receive_cloud_CB, app));
+	*/
+
+	ros::Subscriber rviz_click_subscriber = nh.subscribe("/clicked_point", 1,
 			&Pick_and_place_app::receive_clicked_point_CB, app);
 
-	ros::spin();
+	ros::Rate r(1000);
+	while (ros::ok())
+	{
+		if(app->clicked){
+			ROS_INFO("Clicked was true in main!!!!");
 
+			app->determine_normal_of_point_cloud_at_clicked_point();
+
+			app->pickup();
+		}
+
+		//ros::spinOnce();                   // Handle ROS events
+		ros::AsyncSpinner spinner(4);
+		spinner.start();
+		r.sleep();
+	}
+
+	//ros::AsyncSpinner spinner(1);
+	//spinner.start();
+
+	//ros::spin();
 
 	return 0;
 }
