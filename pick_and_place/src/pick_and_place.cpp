@@ -112,6 +112,12 @@ private:
 
 	pcl::PointXYZ normal;
 
+	manipulation_msgs::Grasp generated_pickup_grasp;
+
+	std::string object_to_manipulate;
+	geometry_msgs::PointStamped object_to_manipulate_position;
+
+
 	move_group_interface::MoveGroup *group;
 
 	ros::Publisher pub_collision_object;
@@ -143,10 +149,6 @@ private:
 	ros::ServiceClient collision_processing_srv;
 	ros::ServiceClient collider_reset_srv;
 
-	ros::ServiceServer pickup_object_srv;
-	ros::ServiceServer place_object_srv;
-	ros::ServiceServer move_arm_out_of_the_way_srv;
-
 	ros::NodeHandle nh;
 
 public:
@@ -166,7 +168,7 @@ public:
 				1);
 
 		//the distance between the surface of the object to grasp and the GRIPPER_FRAME origin
-		nh.param<double>("OBJECT_GRIPPER_STANDOFF", STANDOFF, -0.04);
+		nh.param<double>("OBJECT_GRIPPER_STANDOFF", STANDOFF, 0.08);
 
 		nh.param<std::string>("ARM_BASE_LINK", ARM_BASE_LINK,
 				"katana_base_link");
@@ -206,14 +208,6 @@ public:
 
 		group->allowReplanning(true);
 
-		pickup_object_srv = nh.advertiseService("pickup_object",
-				&Pick_and_place_app::pickup_callback, this);
-
-		place_object_srv = nh.advertiseService("place_object",
-				&Pick_and_place_app::place_callback, this);
-		move_arm_out_of_the_way_srv = nh.advertiseService(
-				"move_arm_out_of_the_way",
-				&Pick_and_place_app::move_arm_out_of_the_way_callback, this);
 
 		//wait for detection client
 		while (!ros::service::waitForService(OBJECT_DETECTION_SERVICE_NAME,
@@ -462,11 +456,48 @@ public:
 		//call object pickup
 		ROS_INFO("Calling the pickup action");
 
-		manipulation_msgs::Grasp grasp = generateGrasp();
+		generated_pickup_grasp = generateGrasp();
 
-		std::string object_to_manipulate = nearest_object();
+		object_to_manipulate = nearest_object();
 
-		group->pick(object_to_manipulate, grasp);
+
+		//test
+
+		/*
+[DEBUG] [1378456372.242171284]: IK pose: position:
+  x: 0.44866
+  y: -0.185202
+  z: 0.392208
+orientation:
+  x: 0.00125435
+  y: -0.00632681
+  z: -0.194471
+  w: 0.980887
+
+[DEBUG] [1378456372.242351955]: Found 4 solutions from IKFast
+[DEBUG] [1378456372.242443678]: Sol 0: -3.914825e-01   1.548975e+00   -1.572923e+00   -3.587233e-02   -4.921995e-03   2.618548e-322
+[DEBUG] [1378456372.243036938]: Solution passes callback
+
+
+		geometry_msgs::PoseStamped p;
+		p.header.frame_id = ARM_BASE_LINK;
+		p.pose.position.x = 0.44866;
+		p.pose.position.y = -0.185202;
+		p.pose.position.z = 0.392208;
+
+
+		p.pose.orientation.x = 0;
+		p.pose.orientation.y = 0;
+		p.pose.orientation.z = 0;
+		p.pose.orientation.w = 1;
+
+		group->setPoseTarget(p,GRIPPER_FRAME);
+
+		group->move();
+*/
+		//group->pick(object_to_manipulate);
+
+		group->pick(object_to_manipulate, generated_pickup_grasp);
 
 		ROS_INFO("Pick returned!!!!!11111 OMGWTFIT");
 
@@ -479,11 +510,13 @@ public:
 				"End effector link: " << rpy.at(0)<< rpy.at(1) << rpy.at(2));
 
 
-		group->place(object_to_manipulate);
 
-		//object_in_gripper = 1;
 
-		//move_arm_out_of_the_way();
+		object_in_gripper = 1;
+
+		move_arm_out_of_the_way();
+
+
 
 		return 0;
 
@@ -552,24 +585,11 @@ public:
 		p.pose.position.y = position.getY();
 		p.pose.position.z = position.getZ();
 
-		//#make the normal pose graspable by the Katana 5DOF gripper (Yaw missing)
+		p.pose.orientation = normalPoseRobotFrame.pose.orientation;
 
-		// Convert quaternion to RPY.
-		tf::Quaternion q;
-		double roll, pitch, yaw;
-		tf::quaternionMsgToTF(normalPoseRobotFrame.pose.orientation, q);
-
-		tf::Matrix3x3(q).getRPY(roll, pitch, yaw);
-
-		//determine yaw which is compatible with the Katana 300 180 kinematics.
-		yaw = atan2(position.getY(), position.getX());
-
-		tf::Quaternion quat = tf::createQuaternionFromRPY(0, pitch, yaw);
-
-		p.pose.orientation.x = quat.getX();
-		p.pose.orientation.y = quat.getY();
-		p.pose.orientation.z = quat.getZ();
-		p.pose.orientation.w = quat.getW();
+		ROS_DEBUG_STREAM("make pose reachable input: " << p.pose);
+		make_pose_reachable_by_5DOF_katana(p);
+		ROS_DEBUG_STREAM("make pose reachable output: " << p.pose);
 
 		manipulation_msgs::Grasp g;
 		g.grasp_pose = p;
@@ -608,7 +628,7 @@ public:
 		//marker.pose = normalPose.pose;
 		marker.header.frame_id = g.grasp_pose.header.frame_id;
 		marker.id = 7;
-		marker.ns = "grasp";
+		marker.ns = "generated_pickup_grasp";
 		marker.header.stamp = ros::Time::now();
 		marker.action = visualization_msgs::Marker::ADD;
 		marker.lifetime = ros::Duration();
@@ -625,6 +645,47 @@ public:
 		return g;
 	}
 
+
+	void make_pose_reachable_by_5DOF_katana(geometry_msgs::PoseStamped &pose){
+
+		//make the normal pose graspable by the Katana 5DOF gripper (Yaw missing)
+
+		//input geometry_msgs::PoseStamped pose;
+		//output geometry_msgs::PoseStamped fixed ppose;
+
+
+
+		// Convert quaternion to RPY.
+		tf::Quaternion q;
+
+		double roll, pitch, yaw;
+		tf::quaternionMsgToTF(pose.pose.orientation, q);
+
+		/*
+		//TODO: check if quaternion is correct
+		if(q.length() < 0.99 || q.length() > 1.01){
+			q.setX(0.0);
+			q.setY(0.0);
+			q.setZ(0.0);
+			q.setW(1.0);
+		}
+		*/
+
+		tf::Matrix3x3(q).getRPY(roll, pitch, yaw);
+
+		//determine yaw which is compatible with the Katana 300 180 kinematics.
+		yaw = atan2(pose.pose.position.y, pose.pose.position.x);
+
+		tf::Quaternion quat = tf::createQuaternionFromRPY(0, pitch, yaw);
+
+		pose.pose.orientation.x = quat.getX();
+		pose.pose.orientation.y = quat.getY();
+		pose.pose.orientation.z = quat.getZ();
+		pose.pose.orientation.w = quat.getW();
+
+	}
+
+
 	bool pickup_callback(std_srvs::Empty::Request &request,
 			std_srvs::Empty::Response &response) {
 		if (pickup()) {
@@ -635,16 +696,82 @@ public:
 
 	bool place_callback(std_srvs::Empty::Request &request,
 			std_srvs::Empty::Response &response) {
-		if (place()) {
-			return false;
-		}
-		return true;
+		return place();
 	}
 
-	int place() {
+	bool place() {
+
+
+
+		//group->place(object_to_manipulate, generated_pickup_grasp.grasp_pose);
+
+
+		std::vector<manipulation_msgs::PlaceLocation> loc;
+
+		geometry_msgs::PoseStamped p;
+		/*
+		p.header.frame_id = BASE_LINK;
+		p.pose.position = object_to_manipulate_position.point;
+
+		p.pose.orientation.x = 0;
+		p.pose.orientation.y = 0;
+		p.pose.orientation.z = 0;
+		p.pose.orientation.w = 1;
+
+		*/
+		p = generated_pickup_grasp.grasp_pose;
+
+
+		make_pose_reachable_by_5DOF_katana(p);
+
+		ROS_DEBUG_STREAM("Place Pose: " << p.pose);
+
+
+		manipulation_msgs::PlaceLocation g;
+		g.place_pose = p;
+
+		g.approach.direction.vector.z = -1.0;
+		g.retreat.direction.vector.x = -1.0;
+		g.retreat.direction.header.frame_id = BASE_LINK;
+		g.approach.direction.header.frame_id = GRIPPER_FRAME;
+		g.approach.min_distance = 0.1;
+		g.approach.desired_distance = 0.2;
+		g.retreat.min_distance = 0.1;
+		g.retreat.desired_distance = 0.25;
+
+		g.post_place_posture.name.resize(1, FINGER_JOINT);
+		g.post_place_posture.position.resize(1);
+		g.post_place_posture.position[0] = 0.30;
+
+
+		loc.push_back(g);
+
+		//group->setSupportSurfaceName("table");
+
+		/* Option path constraints (e.g. to always stay upright)
+		// add path constraints
+		moveit_msgs::Constraints constr;
+		constr.orientation_constraints.resize(1);
+		moveit_msgs::OrientationConstraint &ocm = constr.orientation_constraints[0];
+		ocm.link_name = "r_wrist_roll_link";
+		ocm.header.frame_id = p.header.frame_id;
+		ocm.orientation.x = 0.0;
+		ocm.orientation.y = 0.0;
+		ocm.orientation.z = 0.0;
+		ocm.orientation.w = 1.0;
+		ocm.absolute_x_axis_tolerance = 0.2;
+		ocm.absolute_y_axis_tolerance = 0.2;
+		ocm.absolute_z_axis_tolerance = M_PI;
+		ocm.weight = 1.0;
+		group->setPathConstraints(constr);
+		group->setPlannerId("RRTConnectkConfigDefault");
+		*/
+
+		group->place(object_to_manipulate, loc);
+
+
 
 		/*
-
 		 //create a place location
 		 //geometry_msgs::PoseStamped place_location = pickup_location;
 
@@ -798,7 +925,8 @@ public:
 
 		 object_in_gripper = 0;
 		 */
-		return 0;
+
+		return true;
 	}
 
 	void set_joint_goal() {
@@ -832,7 +960,7 @@ public:
 		ROS_INFO("Move arm out of the way.");
 
 		//move arm to initial home state as defined in the urdf
-		group->setNamedTarget("home rotated");
+		group->setNamedTarget("home_stable");
 
 		group->asyncMove();
 
@@ -1127,7 +1255,10 @@ public:
 
 		if (nearest_object_ind > -1) {
 			ROS_INFO(
-					"nearest object ind: %d (distance: %f)", nearest_object_ind, nearest_dist);
+					"nearest object ind: %d (distance: %f", nearest_object_ind, nearest_dist);
+
+			object_to_manipulate_position = object_positions[nearest_object_ind];
+			ROS_INFO_STREAM("Object Position: " << object_positions[nearest_object_ind]);
 
 			ostringstream id;
 			id << "object " << nearest_object_ind;
@@ -1135,7 +1266,7 @@ public:
 			return id.str().c_str();
 
 		} else {
-			ROS_ERROR("No nearby objects. Unable to select grasp target");
+			ROS_ERROR("No nearby objects. Unable to select generated_pickup_grasp target");
 			return "";
 		}
 
@@ -1153,22 +1284,23 @@ int main(int argc, char **argv) {
 
 	Pick_and_place_app *app = new Pick_and_place_app(&nh);
 
+	//Advertise pickup_object Service and use async callback queue.
+	ros::AdvertiseServiceOptions advertiseServiceOptions = ros::AdvertiseServiceOptions::create<std_srvs::Empty>("pickup_object",boost::bind(&Pick_and_place_app::pickup_callback, app, _1, _2), ros::VoidPtr(), &clicks_queue);
+	ros::ServiceServer pickup_object_srv = nh.advertiseService(advertiseServiceOptions);
 
+	//Advertise place_object Service and use async callback queue.
+	advertiseServiceOptions = ros::AdvertiseServiceOptions::create<std_srvs::Empty>("place_object",boost::bind(&Pick_and_place_app::place_callback, app, _1, _2), ros::VoidPtr(), &clicks_queue);
+	ros::ServiceServer place_object_srv = nh.advertiseService(advertiseServiceOptions);
+
+	//Advertise "move_arm_out_of_the_way" Service and use async callback queue.
+	advertiseServiceOptions = ros::AdvertiseServiceOptions::create<std_srvs::Empty>("move_arm_out_of_the_way",boost::bind(&Pick_and_place_app::move_arm_out_of_the_way_callback, app, _1, _2), ros::VoidPtr(), &clicks_queue);
+	ros::ServiceServer move_arm_out_of_the_way_srv = nh.advertiseService(advertiseServiceOptions);
 
 	// Create a ROS subscriber for the input point cloud
 
 	ros::Subscriber point_cloud_subscriber = nh.subscribe(
 			"/kinect/depth_registered/points", 1,
 			&Pick_and_place_app::receive_cloud_CB, app);
-
-	/*
-	ros::Subscriber point_cloud_subscriber = nh.subscribe(ros::SubscribeOptions::create("/kinect/depth_registered/points", 1,
-			&Pick_and_place_app::receive_cloud_CB, app, clicks_queue));
-	*/
-	/*
-	ros::Subscriber rviz_click_subscriber = nh.subscribe("/clicked_point", 1,
-			&Pick_and_place_app::receive_clicked_point_CB, app);
-	*/
 
 	//Async Queue for Clicks_queue, because the moveit functions like pickup, move don't return in synchronous callbacks
 	ros::SubscribeOptions options = ros::SubscribeOptions::create<geometry_msgs::PointStamped>("/clicked_point", 1, boost::bind(&Pick_and_place_app::receive_clicked_point_CB, app, _1)
