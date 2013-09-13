@@ -16,7 +16,7 @@
 
 #include <object_manipulation_msgs/FindClusterBoundingBox2.h>
 #include <tabletop_object_detector/TabletopDetection.h>
-#include "/home/sp/groovy_rosbuild_workspace/overlay/tabletop_collision_map_processing/srv_gen/cpp/include/tabletop_collision_map_processing/TabletopCollisionMapProcessing.h"
+#include <tabletop_collision_map_processing/TabletopCollisionMapProcessing.h>
 
 //for PTU dynamic reconfigure
 #include <dynamic_reconfigure/DoubleParameter.h>
