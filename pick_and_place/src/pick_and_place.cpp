@@ -16,7 +16,7 @@
 
 #include <object_manipulation_msgs/FindClusterBoundingBox2.h>
 #include <tabletop_object_detector/TabletopDetection.h>
-#include "/home/sp/groovy_rosbuild_workspace/overlay/tabletop_collision_map_processing/srv_gen/cpp/include/tabletop_collision_map_processing/TabletopCollisionMapProcessing.h"
+#include <tabletop_collision_map_processing/TabletopCollisionMapProcessing.h>
 
 //for PTU dynamic reconfigure
 #include <dynamic_reconfigure/DoubleParameter.h>
@@ -27,6 +27,8 @@
 #include <moveit/pick_place/pick_place.h>
 #include <moveit/planning_scene_monitor/planning_scene_monitor.h>
 #include <moveit/move_group_interface/move_group.h>
+#include <moveit_msgs/GetPlanningScene.h>
+#include <moveit_msgs/PlanningSceneComponents.h>
 #include <shape_tools/solid_primitive_dims.h>
 
 // PCL specific includes
@@ -53,6 +55,9 @@ const std::string PLACE_ACTION_NAME =
 		"/object_manipulator/object_manipulator_place";
 const std::string MOVE_ARM_ACTION_NAME = "/move_arm";
 const std::string COLLIDER_RESET_SERVICE_NAME = "/collider_node/reset";
+
+const std::string GET_PLANNING_SCENE_SERVICE_NAME = "/get_planning_scene";
+
 
 static const std::string CLUSTER_BOUNDING_BOX2_3D_NAME =
 		"find_cluster_bounding_box2_3d";
@@ -115,10 +120,12 @@ private:
 	manipulation_msgs::Grasp generated_pickup_grasp;
 
 	std::string object_to_manipulate;
-	geometry_msgs::PointStamped object_to_manipulate_position;
+	geometry_msgs::Point object_to_manipulate_position;
 
 
 	move_group_interface::MoveGroup *group;
+
+
 
 	ros::Publisher pub_collision_object;
 
@@ -148,6 +155,7 @@ private:
 	ros::ServiceClient object_detection_srv;
 	ros::ServiceClient collision_processing_srv;
 	ros::ServiceClient collider_reset_srv;
+	ros::ServiceClient get_planning_scene_srv;
 
 	ros::NodeHandle nh;
 
@@ -208,6 +216,17 @@ public:
 
 		group->allowReplanning(true);
 
+		group->setWorkspace(-0.5,-0.6,-0.3,0.6,0.6,1.5);
+
+		//wait for get planning scene server
+
+		while(!ros::service::waitForService (GET_PLANNING_SCENE_SERVICE_NAME, ros::Duration(2.0)) && nh.ok()){
+			ROS_INFO("Waiting for get planning scene service to come up");
+		}
+		if (!nh.ok())
+			exit(0);
+		get_planning_scene_srv = nh.serviceClient<moveit_msgs::GetPlanningScene>(GET_PLANNING_SCENE_SERVICE_NAME, true);
+
 
 		//wait for detection client
 		while (!ros::service::waitForService(OBJECT_DETECTION_SERVICE_NAME,
@@ -220,8 +239,6 @@ public:
 				tabletop_object_detector::TabletopDetection>(
 				OBJECT_DETECTION_SERVICE_NAME, true);
 
-		vis_marker_publisher = nh.advertise<visualization_msgs::Marker>(
-				"pick_and_place_markers", 128);
 
 		//wait for collision map processing client
 		while (!ros::service::waitForService(COLLISION_PROCESSING_SERVICE_NAME,
@@ -235,9 +252,15 @@ public:
 						tabletop_collision_map_processing::TabletopCollisionMapProcessing>(
 						COLLISION_PROCESSING_SERVICE_NAME, true);
 
+
 		cluster_bounding_box2_3d_client_ = nh.serviceClient<
 				object_manipulation_msgs::FindClusterBoundingBox2>(
 				CLUSTER_BOUNDING_BOX2_3D_NAME, true);
+
+
+		vis_marker_publisher = nh.advertise<visualization_msgs::Marker>(
+					"pick_and_place_markers", 128);
+
 
 		//Sets the kinects tilt angle
 
@@ -347,7 +370,7 @@ public:
 		detection_call.request.return_models = false;
 
 		//we want the individual object point clouds returned as well
-		detection_call.request.return_clusters = true;
+		detection_call.request.return_clusters = false;
 
 		if (!object_detection_srv.call(detection_call)) {
 			ROS_ERROR("Tabletop detection service failed");
@@ -366,6 +389,29 @@ public:
 			return -1;
 		}
 
+		//Remove the table because there are convex hull problems if adding the table to envirnonment
+		//detection_call.response.detection.table.convex_hull = shape_msgs::Mesh();
+
+		tabletop_collision_map_processing::TabletopCollisionMapProcessing process_call;
+
+		process_call.request.detection_result = detection_call.response.detection;
+		process_call.request.reset_collision_models = false;
+		process_call.request.reset_attached_models = false;
+
+		if (!collision_processing_srv.call(process_call)) {
+				ROS_ERROR("Tabletop Collision Map Processing failed");
+				return -1;
+		}
+
+		ROS_INFO_STREAM("Found objects count: " << process_call.response.collision_object_names.size());
+
+		if (process_call.response.collision_object_names.empty()) {
+				ROS_ERROR("Tabletop Collision Map Processing error");
+				return -1;
+		}
+
+		/*
+
 		ROS_INFO("Add table to planning scene");
 
 		moveit_msgs::CollisionObject collision_object;
@@ -374,30 +420,7 @@ public:
 		collision_object.header.frame_id =
 				detection_call.response.detection.table.pose.header.frame_id;
 
-		/*
 
-		 ROS_INFO_STREAM("Collision Object frame: " << detection_call.response.detection.table.pose.header.frame_id);
-
-		 //add table to planning scene
-
-		 // remove table
-		 collision_object.id = "table";
-		 collision_object.operation = moveit_msgs::CollisionObject::REMOVE;
-		 pub_collision_object.publish(collision_object);
-
-		 // add table
-		 collision_object.operation = moveit_msgs::CollisionObject::ADD;
-
-
-		 collision_object.meshes.resize(1);
-		 collision_object.meshes[0] = detection_call.response.detection.table.convex_hull;
-		 collision_object.mesh_poses.resize(1);
-		 collision_object.mesh_poses[0] = detection_call.response.detection.table.pose.pose;
-
-		 pub_collision_object.publish(collision_object);
-
-		 //ROS_DEBUG_STREAM("Table: " << detection_call.response.detection.table);
-		 */
 
 		ROS_INFO_STREAM("Add clusters");
 
@@ -451,12 +474,16 @@ public:
 
 		}
 
+		*/
+
 		//group->setSupportSurfaceName("table");
 
 		//call object pickup
 		ROS_INFO("Calling the pickup action");
 
 		generated_pickup_grasp = generateGrasp();
+
+		ROS_INFO("Get nearest object");
 
 		object_to_manipulate = nearest_object();
 
@@ -496,6 +523,8 @@ orientation:
 		group->move();
 */
 		//group->pick(object_to_manipulate);
+
+		ROS_INFO_STREAM("Picking up Object: " << object_to_manipulate);
 
 		group->pick(object_to_manipulate, generated_pickup_grasp);
 
@@ -653,9 +682,8 @@ orientation:
 		//input geometry_msgs::PoseStamped pose;
 		//output geometry_msgs::PoseStamped fixed ppose;
 
+		//Convert quaternion to RPY.
 
-
-		// Convert quaternion to RPY.
 		tf::Quaternion q;
 
 		double roll, pitch, yaw;
@@ -1218,7 +1246,25 @@ orientation:
 
 	string nearest_object() {
 
-		//uses object_positions, desired_pickup_point
+		//desired_pickup_point
+
+		moveit_msgs::GetPlanningScene get_planning_scene_call;
+
+		//get all planning scene objects
+		get_planning_scene_call.request.components.components = moveit_msgs::PlanningSceneComponents::WORLD_OBJECT_GEOMETRY;
+
+
+
+		if (!get_planning_scene_srv.call(get_planning_scene_call)) {
+				ROS_ERROR("Get Planning Scene call failed");
+				return "";
+		}
+
+		if (get_planning_scene_call.response.scene.world.collision_objects.empty()) {
+				ROS_ERROR("Get Planning scene returned nothing");
+				return "";
+		}
+
 
 		geometry_msgs::PointStamped point;
 
@@ -1232,41 +1278,50 @@ orientation:
 		double nearest_dist = 1e6;
 		int nearest_object_ind = -1;
 
-		for (size_t i = 0; i < object_positions.size(); ++i) {
+		int number_of_scene_objects = get_planning_scene_call.response.scene.world.collision_objects.size() - 1;
+
+		ROS_INFO_STREAM("Number of Scene Objects: " << number_of_scene_objects);
+
+		for (int i = 0; i < number_of_scene_objects; i++) {
+
+			geometry_msgs::Point object_position_in_base_link_frame = get_planning_scene_call.response.scene.world.collision_objects[i].primitive_poses[0].position;
+			ROS_INFO_STREAM("object " << i << " position: " << object_position_in_base_link_frame);
+			/*
 			geometry_msgs::PointStamped object_position_in_base_link_frame;
 			tf_listener->transformPoint("/base_link", object_positions[i],
 					object_position_in_base_link_frame);
-
+			*/
 			double dist = sqrt(
 					pow(
-							object_position_in_base_link_frame.point.x
+							object_position_in_base_link_frame.x
 									- point.point.x, 2.0)
 							+ pow(
-									object_position_in_base_link_frame.point.y
+									object_position_in_base_link_frame.y
 											- point.point.y, 2.0)
 							+ pow(
-									object_position_in_base_link_frame.point.z
+									object_position_in_base_link_frame.z
 											- point.point.z, 2.0));
 			if (dist < nearest_dist) {
 				nearest_dist = dist;
 				nearest_object_ind = i;
+				object_to_manipulate_position = geometry_msgs::Point(object_position_in_base_link_frame);
 			}
 		}
 
-		if (nearest_object_ind > -1) {
-			ROS_INFO(
-					"nearest object ind: %d (distance: %f", nearest_object_ind, nearest_dist);
+		if(nearest_object_ind > -1) {
+			ROS_INFO("NEAREST");
+			ROS_INFO("nearest object ind: %d (distance: %f", nearest_object_ind, nearest_dist);
 
-			object_to_manipulate_position = object_positions[nearest_object_ind];
-			ROS_INFO_STREAM("Object Position: " << object_positions[nearest_object_ind]);
+			//object_to_manipulate_position = get_planning_scene_call.response.scene.world.collision_objects[nearest_object_ind].primitive_poses[0].position;
 
-			ostringstream id;
-			id << "object " << nearest_object_ind;
+			ROS_INFO_STREAM("Object Position: " << object_to_manipulate_position);
 
-			return id.str().c_str();
+			string id = get_planning_scene_call.response.scene.world.collision_objects[nearest_object_ind].id;
+
+			return id.c_str();
 
 		} else {
-			ROS_ERROR("No nearby objects. Unable to select generated_pickup_grasp target");
+			ROS_ERROR("No nearby objects. Unable to select a pickup target");
 			return "";
 		}
 
@@ -1312,20 +1367,6 @@ int main(int argc, char **argv) {
 
 	ROS_INFO("Pick and Place v 0.1 ready to take commands.");
 
-	/*
-	ros::Rate r(1000);
-	while (ros::ok())
-	{
-		if(app->clicked){
-
-		}
-
-		//ros::spinOnce();                   // Handle ROS events
-		ros::AsyncSpinner spinner(4);
-		spinner.start();
-		r.sleep();
-	}
-	*/
 
 	//Async Spinner for Clicks_queue, because the moveit functions like pickup, move don't return in synchronous callbacks
 	ros::AsyncSpinner spinner(0, &clicks_queue);
