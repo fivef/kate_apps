@@ -74,7 +74,7 @@ public:
 class Pick_and_place_app {
 
 private:
-	static const int message_receive_dead_time_in_sec = 5;
+	static const int DEBUG = true;
 
 	//1 normal directly selects grasp pose / 0 nearest objects to selected point is grasped
 	int DIRECTLY_SELECT_GRASP_POSE;
