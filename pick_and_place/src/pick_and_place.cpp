@@ -127,6 +127,8 @@ private:
 
 
 
+
+
 	ros::Publisher pub_collision_object;
 
 	std::vector<geometry_msgs::PointStamped> object_positions;
@@ -176,7 +178,7 @@ public:
 				1);
 
 		//the distance between the surface of the object to grasp and the GRIPPER_FRAME origin
-		nh.param<double>("OBJECT_GRIPPER_STANDOFF", STANDOFF, 0.08);
+		nh.param<double>("OBJECT_GRIPPER_STANDOFF", STANDOFF, 0.02);
 
 		nh.param<std::string>("ARM_BASE_LINK", ARM_BASE_LINK,
 				"katana_base_link");
@@ -524,9 +526,14 @@ orientation:
 */
 		//group->pick(object_to_manipulate);
 
+		group->setPoseTarget(generated_pickup_grasp.grasp_pose, GRIPPER_FRAME);
+
+
 		ROS_INFO_STREAM("Picking up Object: " << object_to_manipulate);
 
 		group->pick(object_to_manipulate, generated_pickup_grasp);
+
+		//group->pick(object_to_manipulate);
 
 		ROS_INFO("Pick returned!!!!!11111 OMGWTFIT");
 
@@ -731,7 +738,9 @@ orientation:
 
 
 
-		//group->place(object_to_manipulate, generated_pickup_grasp.grasp_pose);
+		group->place(object_to_manipulate);
+
+		return true;
 
 
 		std::vector<manipulation_msgs::PlaceLocation> loc;
@@ -988,7 +997,7 @@ orientation:
 		ROS_INFO("Move arm out of the way.");
 
 		//move arm to initial home state as defined in the urdf
-		group->setNamedTarget("home_stable");
+		group->setNamedTarget("home");
 
 		group->asyncMove();
 
