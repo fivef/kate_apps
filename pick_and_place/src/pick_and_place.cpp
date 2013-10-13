@@ -1,6 +1,8 @@
 #include <ros/ros.h>
 
 #include <tf/transform_listener.h>
+#include <tf/transform_broadcaster.h>
+#include <tf/tf.h>
 #include <actionlib/client/simple_action_client.h>
 
 #include <std_srvs/Empty.h>
@@ -12,16 +14,31 @@
 #include <math.h>
 #include <sstream>
 
+#include <actionlib/client/simple_action_client.h>
+#include <actionlib/client/terminal_state.h>
+
 #include <ros/callback_queue.h>
 
+//#include <object_manipulation_msgs/>
 #include <object_manipulation_msgs/FindClusterBoundingBox2.h>
 #include <tabletop_object_detector/TabletopDetection.h>
 #include <tabletop_collision_map_processing/TabletopCollisionMapProcessing.h>
+
+#include <manipulation_msgs/GraspPlanning.h>
+#include <manipulation_msgs/GraspPlanningRequest.h>
+#include <manipulation_msgs/GraspPlanningAction.h>
+#include <manipulation_msgs/GraspPlanningGoal.h>
 
 //for PTU dynamic reconfigure
 #include <dynamic_reconfigure/DoubleParameter.h>
 #include <dynamic_reconfigure/Reconfigure.h>
 #include <dynamic_reconfigure/Config.h>
+
+#include <interactive_markers/interactive_marker_server.h>
+#include <interactive_markers/interactive_marker_client.h>
+#include <interactive_markers/menu_handler.h>
+
+using namespace visualization_msgs;
 
 // MoveIt!
 #include <moveit/pick_place/pick_place.h>
@@ -58,6 +75,11 @@ const std::string COLLIDER_RESET_SERVICE_NAME = "/collider_node/reset";
 
 const std::string GET_PLANNING_SCENE_SERVICE_NAME = "/get_planning_scene";
 
+const std::string PLAN_POINT_CLUSTER_GRASP_SERVICE_NAME =
+		"/plan_point_cluster_grasp";
+
+const std::string EVALUATE_POINT_CLUSTER_GRASP_SERVICE_NAME =
+		"/evaluate_point_cluster_grasps";
 
 static const std::string CLUSTER_BOUNDING_BOX2_3D_NAME =
 		"find_cluster_bounding_box2_3d";
@@ -117,21 +139,22 @@ private:
 
 	pcl::PointXYZ normal;
 
-	manipulation_msgs::Grasp generated_pickup_grasp;
+	geometry_msgs::PoseStamped currentMarkerPose;
+
+	std::vector<manipulation_msgs::Grasp> pickup_grasps;
 
 	std::string object_to_manipulate;
+	int object_to_manipulate_index;
+
 	geometry_msgs::Point object_to_manipulate_position;
 
-
 	move_group_interface::MoveGroup *group;
-
-
-
-
 
 	ros::Publisher pub_collision_object;
 
 	std::vector<geometry_msgs::PointStamped> object_positions;
+
+	std::vector<sensor_msgs::PointCloud> segmented_clusters;
 
 	//index of the object to pick up
 	int object_to_pick_ind;
@@ -158,8 +181,14 @@ private:
 	ros::ServiceClient collision_processing_srv;
 	ros::ServiceClient collider_reset_srv;
 	ros::ServiceClient get_planning_scene_srv;
+	ros::ServiceClient evaluate_point_cluster_grasp_srv_client;
+
+	actionlib::SimpleActionClient<manipulation_msgs::GraspPlanningAction> plan_point_cluster_grasp_action_client;
 
 	ros::NodeHandle nh;
+
+	boost::shared_ptr<interactive_markers::InteractiveMarkerServer> server;
+	interactive_markers::MenuHandler menu_handler;
 
 public:
 
@@ -167,7 +196,11 @@ public:
 	//only calculate normal once after click
 	int clicked;
 
-	Pick_and_place_app(ros::NodeHandle *_nh) {
+	Pick_and_place_app(ros::NodeHandle *_nh) :
+			plan_point_cluster_grasp_action_client(
+					PLAN_POINT_CLUSTER_GRASP_SERVICE_NAME, true)
+
+	{
 
 		nh = *_nh;
 
@@ -178,24 +211,24 @@ public:
 				1);
 
 		//the distance between the surface of the object to grasp and the GRIPPER_FRAME origin
-		nh.param<double>("OBJECT_GRIPPER_STANDOFF", STANDOFF, 0.02);
+		nh.param<double>("OBJECT_GRIPPER_STANDOFF", STANDOFF, -0.1);
 
-		nh.param<std::string>("ARM_BASE_LINK", ARM_BASE_LINK,
-				"katana_base_link");
+		nh.param<std::string>("ARM_BASE_LINK", ARM_BASE_LINK, "jaco_base_link");
 
-		nh.param<std::string>("BASE_LINK", BASE_LINK, "base_link");
+		nh.param<std::string>("BASE_LINK", BASE_LINK, "/base_link");
 
 		nh.param<std::string>("GRIPPER_FRAME", GRIPPER_FRAME,
-				"katana_gripper_tool_frame");
+				"jaco_gripper_tool_frame");
 		nh.param<std::string>("FINGER_JOINT", FINGER_JOINT,
-				"katana_l_finger_joint");
+				"jaco_finger_joint_1");
 		nh.param<std::string>("ARM_NAME", ARM_NAME, "arm");
 
 		clicked = 0;
 
 		object_in_gripper = 0;
 
-		pcl_input_point_cloud = pcl::PointCloud<pcl::PointXYZ>::Ptr(new pcl::PointCloud<pcl::PointXYZ>());
+		pcl_input_point_cloud = pcl::PointCloud<pcl::PointXYZ>::Ptr(
+				new pcl::PointCloud<pcl::PointXYZ>());
 
 		//pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
 
@@ -213,22 +246,24 @@ public:
 
 		//group->setPlanningTime(5.0);
 
-		group->setGoalTolerance(0.01);
-		group->setGoalOrientationTolerance(0.005);
+		//group->setGoalTolerance(0.01);
+		//group->setGoalOrientationTolerance(0.005);
 
 		group->allowReplanning(true);
 
-		group->setWorkspace(-0.5,-0.6,-0.3,0.6,0.6,1.5);
+		group->setWorkspace(-0.5, -0.6, -0.3, 0.6, 0.6, 1.5);
 
 		//wait for get planning scene server
 
-		while(!ros::service::waitForService (GET_PLANNING_SCENE_SERVICE_NAME, ros::Duration(2.0)) && nh.ok()){
+		while (!ros::service::waitForService(GET_PLANNING_SCENE_SERVICE_NAME,
+				ros::Duration(2.0)) && nh.ok()) {
 			ROS_INFO("Waiting for get planning scene service to come up");
 		}
 		if (!nh.ok())
 			exit(0);
-		get_planning_scene_srv = nh.serviceClient<moveit_msgs::GetPlanningScene>(GET_PLANNING_SCENE_SERVICE_NAME, true);
-
+		get_planning_scene_srv =
+				nh.serviceClient<moveit_msgs::GetPlanningScene>(
+						GET_PLANNING_SCENE_SERVICE_NAME, true);
 
 		//wait for detection client
 		while (!ros::service::waitForService(OBJECT_DETECTION_SERVICE_NAME,
@@ -241,7 +276,6 @@ public:
 				tabletop_object_detector::TabletopDetection>(
 				OBJECT_DETECTION_SERVICE_NAME, true);
 
-
 		//wait for collision map processing client
 		while (!ros::service::waitForService(COLLISION_PROCESSING_SERVICE_NAME,
 				ros::Duration(2.0)) && nh.ok()) {
@@ -249,20 +283,31 @@ public:
 		}
 		if (!nh.ok())
 			exit(0);
+
 		collision_processing_srv =
 				nh.serviceClient<
 						tabletop_collision_map_processing::TabletopCollisionMapProcessing>(
 						COLLISION_PROCESSING_SERVICE_NAME, true);
 
-
 		cluster_bounding_box2_3d_client_ = nh.serviceClient<
 				object_manipulation_msgs::FindClusterBoundingBox2>(
 				CLUSTER_BOUNDING_BOX2_3D_NAME, true);
 
+		evaluate_point_cluster_grasp_srv_client = nh.serviceClient<
+				manipulation_msgs::GraspPlanning>(
+				EVALUATE_POINT_CLUSTER_GRASP_SERVICE_NAME, true);
 
 		vis_marker_publisher = nh.advertise<visualization_msgs::Marker>(
-					"pick_and_place_markers", 128);
+				"pick_and_place_markers", 128);
 
+		//ineractive marker server
+		server.reset(
+				new interactive_markers::InteractiveMarkerServer(
+						"basic_controls", "", true));
+
+		make6DofMarker();
+
+		server->applyChanges();
 
 		//Sets the kinects tilt angle
 
@@ -354,205 +399,83 @@ public:
 
 	}
 
-	int pickup() {
-		/*
-		 // ----- pick up object near point (in meter) relative to base_footprint
-		 geometry_msgs::PointStamped pickup_point;
-		 pickup_point.header.frame_id = KURTANA_BASE_LINK;
-		 pickup_point.point.x = desired_pickup_point.x;
-		 pickup_point.point.y = desired_pickup_point.y;
-		 pickup_point.point.z = desired_pickup_point.z;
-		 */
+	int pickup_nearest_segmented_object() {
 
-		// ----- call the tabletop detection
-		ROS_INFO("Calling tabletop detector");
-		tabletop_object_detector::TabletopDetection detection_call;
-		//we want recognized database objects returned
-		//set this to false if you are using the pipeline without the database
-		detection_call.request.return_models = false;
-
-		//we want the individual object point clouds returned as well
-		detection_call.request.return_clusters = false;
-
-		if (!object_detection_srv.call(detection_call)) {
-			ROS_ERROR("Tabletop detection service failed");
-			return -1;
-		}
-		if (detection_call.response.detection.result
-				!= detection_call.response.detection.SUCCESS) {
-			ROS_ERROR(
-					"Tabletop detection returned error code %d", detection_call.response.detection.result);
-			return -1;
-		}
-		if (detection_call.response.detection.clusters.empty()
-				&& detection_call.response.detection.models.empty()) {
-			ROS_ERROR(
-					"The tabletop detector detected the table, but found no objects");
-			return -1;
-		}
-
-		//Remove the table because there are convex hull problems if adding the table to envirnonment
-		//detection_call.response.detection.table.convex_hull = shape_msgs::Mesh();
-
-		tabletop_collision_map_processing::TabletopCollisionMapProcessing process_call;
-
-		process_call.request.detection_result = detection_call.response.detection;
-		process_call.request.reset_collision_models = false;
-		process_call.request.reset_attached_models = false;
-
-		if (!collision_processing_srv.call(process_call)) {
-				ROS_ERROR("Tabletop Collision Map Processing failed");
-				return -1;
-		}
-
-		ROS_INFO_STREAM("Found objects count: " << process_call.response.collision_object_names.size());
-
-		if (process_call.response.collision_object_names.empty()) {
-				ROS_ERROR("Tabletop Collision Map Processing error");
-				return -1;
-		}
-
-		/*
-
-		ROS_INFO("Add table to planning scene");
-
-		moveit_msgs::CollisionObject collision_object;
-
-		collision_object.header.stamp = ros::Time::now();
-		collision_object.header.frame_id =
-				detection_call.response.detection.table.pose.header.frame_id;
-
-
-
-		ROS_INFO_STREAM("Add clusters");
-
-		object_positions.clear();
-
-		//add objects to planning scene
-		for (unsigned int i = 0;
-				i < detection_call.response.detection.clusters.size(); i++) {
-
-			sensor_msgs::PointCloud2 pc2;
-			sensor_msgs::convertPointCloudToPointCloud2(
-					detection_call.response.detection.clusters[i], pc2);
-			geometry_msgs::PoseStamped poseStamped;
-			geometry_msgs::Vector3 dimension;
-			getClusterBoundingBox3D(pc2, poseStamped, dimension);
-
-			geometry_msgs::PointStamped point;
-
-			point.header.frame_id = poseStamped.header.frame_id;
-			point.point = poseStamped.pose.position;
-
-			object_positions.push_back(point);
-
-			ostringstream id;
-			id << "object " << i;
-			collision_object.id = id.str().c_str();
-
-			ROS_INFO_STREAM("Object id: " << collision_object.id);
-
-			collision_object.operation = moveit_msgs::CollisionObject::REMOVE;
-
-			pub_collision_object.publish(collision_object);
-
-			collision_object.operation = moveit_msgs::CollisionObject::ADD;
-			collision_object.primitives.resize(1);
-			collision_object.primitives[0].type =
-					shape_msgs::SolidPrimitive::BOX;
-			collision_object.primitives[0].dimensions.resize(
-					shape_tools::SolidPrimitiveDimCount<
-							shape_msgs::SolidPrimitive::BOX>::value);
-			collision_object.primitives[0].dimensions[shape_msgs::SolidPrimitive::BOX_X] =
-					dimension.x;
-			collision_object.primitives[0].dimensions[shape_msgs::SolidPrimitive::BOX_Y] =
-					dimension.y;
-			collision_object.primitives[0].dimensions[shape_msgs::SolidPrimitive::BOX_Z] =
-					dimension.z;
-			collision_object.primitive_poses.resize(1);
-			collision_object.primitive_poses[0] = poseStamped.pose;
-
-			pub_collision_object.publish(collision_object);
-
-		}
-
-		*/
-
-		//group->setSupportSurfaceName("table");
-
-		//call object pickup
-		ROS_INFO("Calling the pickup action");
-
-		generated_pickup_grasp = generateGrasp();
+		ROS_INFO_STREAM("Picking up nearest segmented object");
 
 		ROS_INFO("Get nearest object");
 
-		object_to_manipulate = nearest_object();
+		detect_objects_on_table();
 
+		find_nearest_object();
 
-		//test
-
-		/*
-[DEBUG] [1378456372.242171284]: IK pose: position:
-  x: 0.44866
-  y: -0.185202
-  z: 0.392208
-orientation:
-  x: 0.00125435
-  y: -0.00632681
-  z: -0.194471
-  w: 0.980887
-
-[DEBUG] [1378456372.242351955]: Found 4 solutions from IKFast
-[DEBUG] [1378456372.242443678]: Sol 0: -3.914825e-01   1.548975e+00   -1.572923e+00   -3.587233e-02   -4.921995e-03   2.618548e-322
-[DEBUG] [1378456372.243036938]: Solution passes callback
-
-
-		geometry_msgs::PoseStamped p;
-		p.header.frame_id = ARM_BASE_LINK;
-		p.pose.position.x = 0.44866;
-		p.pose.position.y = -0.185202;
-		p.pose.position.z = 0.392208;
-
-
-		p.pose.orientation.x = 0;
-		p.pose.orientation.y = 0;
-		p.pose.orientation.z = 0;
-		p.pose.orientation.w = 1;
-
-		group->setPoseTarget(p,GRIPPER_FRAME);
-
-		group->move();
-*/
-		//group->pick(object_to_manipulate);
-
-		group->setPoseTarget(generated_pickup_grasp.grasp_pose, GRIPPER_FRAME);
-
-
-		ROS_INFO_STREAM("Picking up Object: " << object_to_manipulate);
-
-		group->pick(object_to_manipulate, generated_pickup_grasp);
-
-		//group->pick(object_to_manipulate);
-
-		ROS_INFO("Pick returned!!!!!11111 OMGWTFIT");
-
-		//group->place(object_to_manipulate);
-
-		std::vector<double> rpy = group->getCurrentRPY(
-				group->getEndEffectorLink());
+		generate_grasps_for_nearest_cluster();
 
 		ROS_INFO_STREAM(
-				"End effector link: " << rpy.at(0)<< rpy.at(1) << rpy.at(2));
+				"Picking up Object: " << object_to_manipulate << " with " << pickup_grasps.size() << " grasps to try");
 
+		setMarkerPoseToFirstGrasp();
 
-
+		pickup();
 
 		object_in_gripper = 1;
 
-		move_arm_out_of_the_way();
+		return 0;
+	}
 
+	int pickup_with_current_marker_pose() {
 
+		pickup_grasps.resize(1);
+		pickup_grasps[0] = generateGraspFromPoseStamped(currentMarkerPose);
+
+		create_dummy_collision_object();
+
+		pickup();
+
+		return 0;
+	}
+
+	int move_to_current_marker_pose() {
+
+		pickup_grasps.resize(1);
+		pickup_grasps[0] = generateGraspFromPoseStamped(currentMarkerPose);
+
+		group->setPoseTarget(currentMarkerPose);
+
+		group->move();
+
+		return 0;
+	}
+
+	int pickup_with_normal() {
+
+		ROS_INFO_STREAM("Picking up by surface normal");
+
+		ROS_INFO("Calling the pickup action");
+
+		pickup_grasps.resize(1);
+		pickup_grasps[0] = generateGraspFromNormal();
+
+		setMarkerPoseToFirstGrasp();
+
+		create_dummy_collision_object();
+
+		pickup();
+
+		return 0;
+	}
+
+	int pickup() {
+
+		//group->setSupportSurfaceName("table");
+
+		draw_grasps_to_try();
+
+		group->pick(object_to_manipulate, pickup_grasps);
+
+		object_in_gripper = 1;
+
+		//move_arm_out_of_the_way();
 
 		return 0;
 
@@ -579,26 +502,279 @@ orientation:
 		}
 	}
 
-	manipulation_msgs::Grasp generateGrasp() {
+	void draw_selected_cluster() {
 
-		/*
-		 sensor_msgs::JointState pre_grasp_joint_state_;
-		 sensor_msgs::JointState grasp_joint_state_;
+		std::vector<geometry_msgs::Point32> points =
+				segmented_clusters[object_to_manipulate_index].points;
 
-		 pre_grasp_joint_state_.name.push_back("katana_l_finger_joint");
-		 pre_grasp_joint_state_.name.push_back("katana_r_finger_joint");
-		 pre_grasp_joint_state_.position.push_back(0.30);
-		 pre_grasp_joint_state_.position.push_back(0.30);
-		 pre_grasp_joint_state_.effort.push_back(100.0);
-		 pre_grasp_joint_state_.effort.push_back(100.0);
+		//draw cluster
+		visualization_msgs::Marker marker;
 
-		 grasp_joint_state_.name = pre_grasp_joint_state_.name;
-		 grasp_joint_state_.position.push_back(-0.44);
-		 grasp_joint_state_.position.push_back(-0.44);
-		 grasp_joint_state_.effort.push_back(90.0);
-		 grasp_joint_state_.effort.push_back(90.0);
+		ROS_INFO_STREAM("Number of points in cluster: " << points.size());
 
-		 */
+		for (size_t i = 0; i < points.size(); i++) {
+			marker.pose.position.x = points[i].x;
+			marker.pose.position.y = points[i].y;
+			marker.pose.position.z = points[i].z;
+
+			//show markers in kinect frame
+			marker.header.frame_id =
+					segmented_clusters[object_to_manipulate_index].header.frame_id;
+			marker.id = i;
+			marker.ns = "cluster";
+			marker.header.stamp = ros::Time::now();
+			marker.action = visualization_msgs::Marker::ADD;
+			marker.lifetime = ros::Duration();
+			marker.type = visualization_msgs::Marker::SPHERE;
+			marker.scale.x = 0.002;
+			marker.scale.y = 0.002;
+			marker.scale.z = 0.002;
+			marker.color.r = 0;
+			marker.color.g = 0;
+			marker.color.b = 1;
+			marker.color.a = 1.0;
+			vis_marker_publisher.publish(marker);
+
+		}
+
+	}
+
+	int generate_grasps_for_nearest_cluster() {
+
+		ROS_INFO("Generateing grasps for nearest cluster");
+		//draw_selected_cluster();
+
+		//Get grasps
+
+		manipulation_msgs::GraspPlanningGoal graspPlanningGoal;
+
+		graspPlanningGoal.target.reference_frame_id = BASE_LINK;
+		graspPlanningGoal.target.cluster =
+				segmented_clusters[object_to_manipulate_index];
+
+		graspPlanningGoal.arm_name = "arm";
+
+		plan_point_cluster_grasp_action_client.sendGoal(graspPlanningGoal);
+
+		//wait for the action to return
+		bool finished_before_timeout =
+				plan_point_cluster_grasp_action_client.waitForResult(
+						ros::Duration(30.0));
+
+		if (finished_before_timeout) {
+			actionlib::SimpleClientGoalState state =
+					plan_point_cluster_grasp_action_client.getState();
+			ROS_INFO("Action finished: %s", state.toString().c_str());
+
+			pickup_grasps =
+					plan_point_cluster_grasp_action_client.getResult()->grasps;
+
+		} else
+			ROS_INFO("Action did not finish before the time out.");
+
+		//exit
+		return 0;
+	}
+
+	int detect_objects_on_table() {
+		// ----- call the tabletop detection
+		ROS_INFO("Calling tabletop detector");
+		tabletop_object_detector::TabletopDetection detection_call;
+		//we want recognized database objects returned
+		//set this to false if you are using the pipeline without the database
+		detection_call.request.return_models = false;
+
+		//we want the individual object point clouds returned as well
+		detection_call.request.return_clusters = true;
+
+		if (!object_detection_srv.call(detection_call)) {
+			ROS_ERROR("Tabletop detection service failed");
+			return -1;
+		}
+		if (detection_call.response.detection.result
+				!= detection_call.response.detection.SUCCESS) {
+			ROS_ERROR(
+					"Tabletop detection returned error code %d", detection_call.response.detection.result);
+			return -1;
+		}
+		if (detection_call.response.detection.clusters.empty()
+				&& detection_call.response.detection.models.empty()) {
+			ROS_ERROR(
+					"The tabletop detector detected the table, but found no objects");
+			return -1;
+		}
+
+		//save clusters for later
+
+		segmented_clusters = detection_call.response.detection.clusters;
+
+		ROS_INFO_STREAM(
+				"Number of clusters found: " << segmented_clusters.size());
+
+		//Remove the table because there are convex hull problems if adding the table to envirnonment
+		//detection_call.response.detection.table.convex_hull = shape_msgs::Mesh();
+
+		tabletop_collision_map_processing::TabletopCollisionMapProcessing process_call;
+
+		process_call.request.detection_result =
+				detection_call.response.detection;
+		process_call.request.reset_collision_models = false;
+		process_call.request.reset_attached_models = false;
+
+		if (!collision_processing_srv.call(process_call)) {
+			ROS_ERROR("Tabletop Collision Map Processing failed");
+			return -1;
+		}
+
+		ROS_INFO_STREAM(
+				"Found objects count: " << process_call.response.collision_object_names.size());
+
+		if (process_call.response.collision_object_names.empty()) {
+			ROS_ERROR("Tabletop Collision Map Processing error");
+			return -1;
+		}
+
+		return 0;
+
+	}
+
+	/*
+	 * creates a dummy collision object for the pick() function
+	 * Takes the pickup_grasp to set the objects pose.
+	 */
+	void create_dummy_collision_object() {
+		moveit_msgs::CollisionObject collision_object;
+
+		collision_object.header.stamp = ros::Time::now();
+		collision_object.header.frame_id = BASE_LINK;
+
+		//add object
+
+		collision_object.id = "dummy";
+
+		collision_object.operation = moveit_msgs::CollisionObject::REMOVE;
+
+		pub_collision_object.publish(collision_object);
+
+		collision_object.operation = moveit_msgs::CollisionObject::ADD;
+		collision_object.primitives.resize(1);
+		collision_object.primitives[0].type = shape_msgs::SolidPrimitive::BOX;
+		collision_object.primitives[0].dimensions.resize(
+				shape_tools::SolidPrimitiveDimCount<
+						shape_msgs::SolidPrimitive::BOX>::value);
+		collision_object.primitives[0].dimensions[shape_msgs::SolidPrimitive::BOX_X] =
+				0.05;
+		collision_object.primitives[0].dimensions[shape_msgs::SolidPrimitive::BOX_Y] =
+				0.05;
+		collision_object.primitives[0].dimensions[shape_msgs::SolidPrimitive::BOX_Z] =
+				0.1;
+		collision_object.primitive_poses.resize(1);
+		collision_object.primitive_poses[0] = pickup_grasps[0].grasp_pose.pose;
+
+		pub_collision_object.publish(collision_object);
+
+		//set the current object to manipulate to the generated dummy object
+		object_to_manipulate = "dummy";
+
+	}
+
+	/*
+	 * Generate a grasp out of a pose
+	 */
+
+	manipulation_msgs::Grasp generateGraspFromPoseStamped(
+			geometry_msgs::PoseStamped pose) {
+
+		manipulation_msgs::Grasp g;
+		g.grasp_pose = pose;
+
+		g.approach.direction.vector.x = 1.0;
+		g.approach.direction.header.frame_id = GRIPPER_FRAME;
+		g.approach.min_distance = 0.02;
+		g.approach.desired_distance = 0.03;
+
+		g.retreat.direction.header.frame_id = BASE_LINK;
+		g.retreat.direction.vector.z = 1.0;
+		g.retreat.min_distance = 0.02;
+		g.retreat.desired_distance = 0.03;
+
+		g.pre_grasp_posture.header.frame_id = BASE_LINK;
+		g.pre_grasp_posture.header.stamp = ros::Time::now();
+		g.pre_grasp_posture.name.resize(2);
+		g.pre_grasp_posture.name[0] = FINGER_JOINT;
+		g.pre_grasp_posture.position.resize(2);
+		g.pre_grasp_posture.position[0] = -0.5;
+
+		//TODO create params for this
+		g.pre_grasp_posture.name[1] = "jaco_finger_joint_2";
+		g.pre_grasp_posture.position[1] = -0.5;
+
+		g.grasp_posture.header.frame_id = BASE_LINK;
+		g.grasp_posture.header.stamp = ros::Time::now();
+		g.grasp_posture.name.resize(2);
+		g.grasp_posture.name[0] = FINGER_JOINT;
+		g.grasp_posture.position.resize(2);
+		g.grasp_posture.position[0] = 0.2;
+
+		g.grasp_posture.name[1] = "jaco_finger_joint_2";
+		g.grasp_posture.position[1] = 0.2;
+
+		g.allowed_touch_objects.resize(1);
+		g.allowed_touch_objects[0] = "dummy";
+
+		ROS_DEBUG_STREAM("Grasp frame id: " << g.grasp_pose.header.frame_id);
+
+		ROS_DEBUG_STREAM("Grasp Pose" << g.grasp_pose.pose);
+
+
+
+		return g;
+
+	}
+
+	void draw_grasps_to_try() {
+
+		for (size_t i = 0; i < pickup_grasps.size(); ++i) {
+
+			visualization_msgs::Marker marker;
+			marker.pose = pickup_grasps[i].grasp_pose.pose;
+
+			//marker.pose = normalPose.pose;
+			marker.header.frame_id =
+					pickup_grasps[i].grasp_pose.header.frame_id;
+			marker.id = i;
+			marker.ns = "generated_pickup_grasp";
+			marker.header.stamp = ros::Time::now();
+			marker.action = visualization_msgs::Marker::ADD;
+			marker.lifetime = ros::Duration();
+
+			marker.type = Marker::CUBE;
+					marker.scale.x = 0.03;
+					marker.scale.y = 0.1;
+					marker.scale.z = 0.01;
+					marker.color.r = 0.5;
+					marker.color.g = 0.5;
+					marker.color.b = 0.5;
+					marker.color.a = 1.0;
+			/*
+			marker.type = visualization_msgs::Marker::ARROW;
+			marker.scale.x = 0.05;
+			marker.scale.y = 0.005;
+			marker.scale.z = 0.005;
+			marker.color.r = 0;
+			marker.color.g = 1;
+			marker.color.b = 0;
+			marker.color.a = 1.0;
+			*/
+			vis_marker_publisher.publish(marker);
+		}
+
+	}
+
+	/*
+	 * Generates a Grasp out of the normalPoseRobotFrame pose.
+	 */
+	manipulation_msgs::Grasp generateGraspFromNormal() {
 
 		tf::Vector3 position;
 		position.setX(normalPoseRobotFrame.pose.position.x);
@@ -623,66 +799,12 @@ orientation:
 
 		p.pose.orientation = normalPoseRobotFrame.pose.orientation;
 
-		ROS_DEBUG_STREAM("make pose reachable input: " << p.pose);
 		make_pose_reachable_by_5DOF_katana(p);
-		ROS_DEBUG_STREAM("make pose reachable output: " << p.pose);
 
-		manipulation_msgs::Grasp g;
-		g.grasp_pose = p;
-
-		g.approach.direction.vector.x = 1.0;
-		g.approach.direction.header.frame_id = GRIPPER_FRAME;
-		g.approach.min_distance = 0.05;
-		g.approach.desired_distance = 0.07;
-
-		g.retreat.direction.header.frame_id = BASE_LINK;
-		g.retreat.direction.vector.z = 1.0;
-		g.retreat.min_distance = 0.05;
-		g.retreat.desired_distance = 0.07;
-
-		g.pre_grasp_posture.header.frame_id = BASE_LINK;
-		g.pre_grasp_posture.header.stamp = ros::Time::now();
-		g.pre_grasp_posture.name.resize(1);
-		g.pre_grasp_posture.name[0] = FINGER_JOINT;
-		g.pre_grasp_posture.position.resize(1);
-		g.pre_grasp_posture.position[0] = 0.30;
-
-		g.grasp_posture.header.frame_id = BASE_LINK;
-		g.grasp_posture.header.stamp = ros::Time::now();
-		g.grasp_posture.name.resize(1);
-		g.grasp_posture.name[0] = FINGER_JOINT;
-		g.grasp_posture.position.resize(1);
-		g.grasp_posture.position[0] = -0.44;
-
-		ROS_DEBUG_STREAM("Grasp frame id: " << g.grasp_pose.header.frame_id);
-
-		ROS_DEBUG_STREAM("Grasp Pose" << g.grasp_pose.pose);
-
-		visualization_msgs::Marker marker;
-		marker.pose = g.grasp_pose.pose;
-
-		//marker.pose = normalPose.pose;
-		marker.header.frame_id = g.grasp_pose.header.frame_id;
-		marker.id = 7;
-		marker.ns = "generated_pickup_grasp";
-		marker.header.stamp = ros::Time::now();
-		marker.action = visualization_msgs::Marker::ADD;
-		marker.lifetime = ros::Duration();
-		marker.type = visualization_msgs::Marker::ARROW;
-		marker.scale.x = 0.05;
-		marker.scale.y = 0.005;
-		marker.scale.z = 0.005;
-		marker.color.r = 0;
-		marker.color.g = 1;
-		marker.color.b = 0;
-		marker.color.a = 1.0;
-		vis_marker_publisher.publish(marker);
-
-		return g;
+		return generateGraspFromPoseStamped(p);
 	}
 
-
-	void make_pose_reachable_by_5DOF_katana(geometry_msgs::PoseStamped &pose){
+	void make_pose_reachable_by_5DOF_katana(geometry_msgs::PoseStamped &pose) {
 
 		//make the normal pose graspable by the Katana 5DOF gripper (Yaw missing)
 
@@ -697,14 +819,14 @@ orientation:
 		tf::quaternionMsgToTF(pose.pose.orientation, q);
 
 		/*
-		//TODO: check if quaternion is correct
-		if(q.length() < 0.99 || q.length() > 1.01){
-			q.setX(0.0);
-			q.setY(0.0);
-			q.setZ(0.0);
-			q.setW(1.0);
-		}
-		*/
+		 //TODO: check if quaternion is correct
+		 if(q.length() < 0.99 || q.length() > 1.01){
+		 q.setX(0.0);
+		 q.setY(0.0);
+		 q.setZ(0.0);
+		 q.setW(1.0);
+		 }
+		 */
 
 		tf::Matrix3x3(q).getRPY(roll, pitch, yaw);
 
@@ -719,7 +841,6 @@ orientation:
 		pose.pose.orientation.w = quat.getW();
 
 	}
-
 
 	bool pickup_callback(std_srvs::Empty::Request &request,
 			std_srvs::Empty::Response &response) {
@@ -736,33 +857,27 @@ orientation:
 
 	bool place() {
 
-
-
 		group->place(object_to_manipulate);
 
 		return true;
-
 
 		std::vector<manipulation_msgs::PlaceLocation> loc;
 
 		geometry_msgs::PoseStamped p;
 		/*
-		p.header.frame_id = BASE_LINK;
-		p.pose.position = object_to_manipulate_position.point;
+		 p.header.frame_id = BASE_LINK;
+		 p.pose.position = object_to_manipulate_position.point;
 
-		p.pose.orientation.x = 0;
-		p.pose.orientation.y = 0;
-		p.pose.orientation.z = 0;
-		p.pose.orientation.w = 1;
+		 p.pose.orientation.x = 0;
+		 p.pose.orientation.y = 0;
+		 p.pose.orientation.z = 0;
+		 p.pose.orientation.w = 1;
 
-		*/
-		p = generated_pickup_grasp.grasp_pose;
-
-
+		 */
+		//p = pickup_grasp.grasp_pose;
 		make_pose_reachable_by_5DOF_katana(p);
 
 		ROS_DEBUG_STREAM("Place Pose: " << p.pose);
-
 
 		manipulation_msgs::PlaceLocation g;
 		g.place_pose = p;
@@ -780,33 +895,30 @@ orientation:
 		g.post_place_posture.position.resize(1);
 		g.post_place_posture.position[0] = 0.30;
 
-
 		loc.push_back(g);
 
 		//group->setSupportSurfaceName("table");
 
 		/* Option path constraints (e.g. to always stay upright)
-		// add path constraints
-		moveit_msgs::Constraints constr;
-		constr.orientation_constraints.resize(1);
-		moveit_msgs::OrientationConstraint &ocm = constr.orientation_constraints[0];
-		ocm.link_name = "r_wrist_roll_link";
-		ocm.header.frame_id = p.header.frame_id;
-		ocm.orientation.x = 0.0;
-		ocm.orientation.y = 0.0;
-		ocm.orientation.z = 0.0;
-		ocm.orientation.w = 1.0;
-		ocm.absolute_x_axis_tolerance = 0.2;
-		ocm.absolute_y_axis_tolerance = 0.2;
-		ocm.absolute_z_axis_tolerance = M_PI;
-		ocm.weight = 1.0;
-		group->setPathConstraints(constr);
-		group->setPlannerId("RRTConnectkConfigDefault");
-		*/
+		 // add path constraints
+		 moveit_msgs::Constraints constr;
+		 constr.orientation_constraints.resize(1);
+		 moveit_msgs::OrientationConstraint &ocm = constr.orientation_constraints[0];
+		 ocm.link_name = "r_wrist_roll_link";
+		 ocm.header.frame_id = p.header.frame_id;
+		 ocm.orientation.x = 0.0;
+		 ocm.orientation.y = 0.0;
+		 ocm.orientation.z = 0.0;
+		 ocm.orientation.w = 1.0;
+		 ocm.absolute_x_axis_tolerance = 0.2;
+		 ocm.absolute_y_axis_tolerance = 0.2;
+		 ocm.absolute_z_axis_tolerance = M_PI;
+		 ocm.weight = 1.0;
+		 group->setPathConstraints(constr);
+		 group->setPlannerId("RRTConnectkConfigDefault");
+		 */
 
 		group->place(object_to_manipulate, loc);
-
-
 
 		/*
 		 //create a place location
@@ -966,20 +1078,6 @@ orientation:
 		return true;
 	}
 
-	void set_joint_goal() {
-
-		group->setJointValueTarget("katana_motor1_pan_joint", -1.51);
-		group->setJointValueTarget("katana_motor2_lift_joint",
-				2.13549384276445);
-		group->setJointValueTarget("katana_motor3_lift_joint",
-				-2.1556486321117725);
-		group->setJointValueTarget("katana_motor4_lift_joint",
-				-1.971949347057968);
-		group->setJointValueTarget("katana_motor5_wrist_roll_joint", 0.0);
-
-		return;
-	}
-
 	bool move_arm_out_of_the_way_callback(std_srvs::Empty::Request &request,
 			std_srvs::Empty::Response &response) {
 		if (move_arm_out_of_the_way()) {
@@ -1011,7 +1109,7 @@ orientation:
 	int clear_collision_map() {
 
 		//if (sim)
-		ros::Duration(2.0).sleep(); // only necessary for Gazebo (the simulated Kinect point cloud lags, so we need to wait for it to settle)
+		ros::Duration(2.0).sleep();	// only necessary for Gazebo (the simulated Kinect point cloud lags, so we need to wait for it to settle)
 
 		// ----- reset collision map
 		ROS_INFO("Clearing collision map");
@@ -1021,7 +1119,7 @@ orientation:
 			return -1;
 		}
 		//if (sim)
-		ros::Duration(3.0).sleep(); // wait for collision map to be completely cleared
+		ros::Duration(3.0).sleep();	// wait for collision map to be completely cleared
 
 		return 0;
 
@@ -1048,7 +1146,9 @@ orientation:
 
 		determine_normal_of_point_cloud_at_clicked_point();
 
-		pickup();
+
+
+		//pickup();
 
 	}
 
@@ -1246,34 +1346,32 @@ orientation:
 			const sensor_msgs::PointCloud2ConstPtr& ros_input_cloud) {
 
 		//if (clicked) {
-			//clicked = false;
-			//ROS_INFO("Received point cloud");
-			pcl::fromROSMsg(*ros_input_cloud, *pcl_input_point_cloud);
+		//clicked = false;
+		//ROS_INFO("Received point cloud");
+		pcl::fromROSMsg(*ros_input_cloud, *pcl_input_point_cloud);
 		//}
 
 	}
 
-	string nearest_object() {
+	bool find_nearest_object() {
 
 		//desired_pickup_point
 
 		moveit_msgs::GetPlanningScene get_planning_scene_call;
 
 		//get all planning scene objects
-		get_planning_scene_call.request.components.components = moveit_msgs::PlanningSceneComponents::WORLD_OBJECT_GEOMETRY;
-
-
+		get_planning_scene_call.request.components.components =
+				moveit_msgs::PlanningSceneComponents::WORLD_OBJECT_GEOMETRY;
 
 		if (!get_planning_scene_srv.call(get_planning_scene_call)) {
-				ROS_ERROR("Get Planning Scene call failed");
-				return "";
+			ROS_ERROR("Get Planning Scene call failed");
+			return false;
 		}
 
 		if (get_planning_scene_call.response.scene.world.collision_objects.empty()) {
-				ROS_ERROR("Get Planning scene returned nothing");
-				return "";
+			ROS_ERROR("Get Planning scene returned nothing");
+			return false;
 		}
-
 
 		geometry_msgs::PointStamped point;
 
@@ -1287,23 +1385,26 @@ orientation:
 		double nearest_dist = 1e6;
 		int nearest_object_ind = -1;
 
-		int number_of_scene_objects = get_planning_scene_call.response.scene.world.collision_objects.size() - 1;
+		int number_of_scene_objects =
+				get_planning_scene_call.response.scene.world.collision_objects.size()
+						- 1;
 
 		ROS_INFO_STREAM("Number of Scene Objects: " << number_of_scene_objects);
 
 		for (int i = 0; i < number_of_scene_objects; i++) {
 
-			geometry_msgs::Point object_position_in_base_link_frame = get_planning_scene_call.response.scene.world.collision_objects[i].primitive_poses[0].position;
-			ROS_INFO_STREAM("object " << i << " position: " << object_position_in_base_link_frame);
+			geometry_msgs::Point object_position_in_base_link_frame =
+					get_planning_scene_call.response.scene.world.collision_objects[i].primitive_poses[0].position;
+			ROS_INFO_STREAM(
+					"object " << i << " position: " << object_position_in_base_link_frame);
 			/*
-			geometry_msgs::PointStamped object_position_in_base_link_frame;
-			tf_listener->transformPoint("/base_link", object_positions[i],
-					object_position_in_base_link_frame);
-			*/
+			 geometry_msgs::PointStamped object_position_in_base_link_frame;
+			 tf_listener->transformPoint("/base_link", object_positions[i],
+			 object_position_in_base_link_frame);
+			 */
 			double dist = sqrt(
-					pow(
-							object_position_in_base_link_frame.x
-									- point.point.x, 2.0)
+					pow(object_position_in_base_link_frame.x - point.point.x,
+							2.0)
 							+ pow(
 									object_position_in_base_link_frame.y
 											- point.point.y, 2.0)
@@ -1313,27 +1414,229 @@ orientation:
 			if (dist < nearest_dist) {
 				nearest_dist = dist;
 				nearest_object_ind = i;
-				object_to_manipulate_position = geometry_msgs::Point(object_position_in_base_link_frame);
+				object_to_manipulate_position = geometry_msgs::Point(
+						object_position_in_base_link_frame);
 			}
 		}
 
-		if(nearest_object_ind > -1) {
+		if (nearest_object_ind > -1) {
 			ROS_INFO("NEAREST");
-			ROS_INFO("nearest object ind: %d (distance: %f", nearest_object_ind, nearest_dist);
+			ROS_INFO(
+					"nearest object ind: %d (distance: %f", nearest_object_ind, nearest_dist);
 
 			//object_to_manipulate_position = get_planning_scene_call.response.scene.world.collision_objects[nearest_object_ind].primitive_poses[0].position;
 
-			ROS_INFO_STREAM("Object Position: " << object_to_manipulate_position);
+			ROS_INFO_STREAM(
+					"Object Position: " << object_to_manipulate_position);
 
-			string id = get_planning_scene_call.response.scene.world.collision_objects[nearest_object_ind].id;
+			object_to_manipulate_index = nearest_object_ind;
 
-			return id.c_str();
+			string id =
+					get_planning_scene_call.response.scene.world.collision_objects[nearest_object_ind].id;
+
+			object_to_manipulate = id.c_str();
+
+			return true;
 
 		} else {
 			ROS_ERROR("No nearby objects. Unable to select a pickup target");
-			return "";
+			return false;
 		}
 
+	}
+
+	Marker makeBox(InteractiveMarker &msg) {
+
+		//TODO: make gripper nicer http://answers.ros.org/question/12840/drawing-the-pr2-gripper-in-rviz/
+		//https://github.com/ros-interactive-manipulation/pr2_object_manipulation/tree/groovy-devel/manipulation/pr2_marker_control/src
+		Marker marker;
+
+		marker.type = Marker::CUBE;
+		marker.scale.x = 0.03;
+		marker.scale.y = 0.1;
+		marker.scale.z = 0.01;
+		marker.color.r = 0.5;
+		marker.color.g = 0.5;
+		marker.color.b = 0.5;
+		marker.color.a = 1.0;
+
+		return marker;
+	}
+
+	InteractiveMarkerControl& makeBoxControl(InteractiveMarker &msg) {
+		InteractiveMarkerControl control;
+		control.always_visible = true;
+		control.markers.push_back(makeBox(msg));
+		msg.controls.push_back(control);
+
+		return msg.controls.back();
+	}
+
+	void make6DofMarker() {
+
+		//menu
+		menu_handler.insert("Pickup Nearest Segmented Object",
+				boost::bind(&Pick_and_place_app::processFeedback, this, _1));
+		menu_handler.insert("Pickup by Surface Normal",
+				boost::bind(&Pick_and_place_app::processFeedback, this, _1));
+		menu_handler.insert("Pickup by Marker Pose",
+				boost::bind(&Pick_and_place_app::processFeedback, this, _1));
+		menu_handler.insert("move_to_current_marker_pose",
+				boost::bind(&Pick_and_place_app::processFeedback, this, _1));
+		menu_handler.insert("reset_collision_environment",
+				boost::bind(&Pick_and_place_app::processFeedback, this, _1));
+
+		InteractiveMarker int_marker;
+		int_marker.header.frame_id = BASE_LINK;
+
+		tf::Vector3 position;
+
+		position = tf::Vector3(0, 0, 0);
+		tf::pointTFToMsg(position, int_marker.pose.position);
+		int_marker.scale = 0.1;
+
+		int_marker.name = "simple_6dof";
+		int_marker.description = "Simple 6-DOF Control";
+
+		// insert a box
+		makeBoxControl(int_marker);
+		int_marker.controls[0].interaction_mode =
+				visualization_msgs::InteractiveMarkerControl::MOVE_ROTATE_3D;
+
+		InteractiveMarkerControl control;
+
+		control.orientation.w = 1;
+		control.orientation.x = 1;
+		control.orientation.y = 0;
+		control.orientation.z = 0;
+		control.name = "rotate_x";
+		control.interaction_mode = InteractiveMarkerControl::ROTATE_AXIS;
+		int_marker.controls.push_back(control);
+		control.name = "move_x";
+		control.interaction_mode = InteractiveMarkerControl::MOVE_AXIS;
+		int_marker.controls.push_back(control);
+
+		control.orientation.w = 1;
+		control.orientation.x = 0;
+		control.orientation.y = 1;
+		control.orientation.z = 0;
+		control.name = "rotate_z";
+		control.interaction_mode = InteractiveMarkerControl::ROTATE_AXIS;
+		int_marker.controls.push_back(control);
+		control.name = "move_z";
+		control.interaction_mode = InteractiveMarkerControl::MOVE_AXIS;
+		int_marker.controls.push_back(control);
+
+		control.orientation.w = 1;
+		control.orientation.x = 0;
+		control.orientation.y = 0;
+		control.orientation.z = 1;
+		control.name = "rotate_y";
+		control.interaction_mode = InteractiveMarkerControl::ROTATE_AXIS;
+		int_marker.controls.push_back(control);
+		control.name = "move_y";
+		control.interaction_mode = InteractiveMarkerControl::MOVE_AXIS;
+		int_marker.controls.push_back(control);
+
+		server->insert(int_marker);
+
+		server->setCallback(int_marker.name,
+				boost::bind(&Pick_and_place_app::processFeedback, this, _1));
+
+		menu_handler.apply(*server, int_marker.name);
+
+		server->applyChanges();
+	}
+
+	void setMarkerPoseToFirstGrasp() {
+
+		InteractiveMarker int_marker;
+		server->get("simple_6dof", int_marker);
+
+		int_marker.pose = pickup_grasps[0].grasp_pose.pose;
+
+		currentMarkerPose = pickup_grasps[0].grasp_pose;
+
+		server->insert(int_marker);
+
+		server->applyChanges();
+
+	}
+
+	void processFeedback(
+			const visualization_msgs::InteractiveMarkerFeedbackConstPtr &feedback) {
+		std::ostringstream s;
+		s << "Feedback from marker '" << feedback->marker_name << "' "
+				<< " / control '" << feedback->control_name << "'";
+
+		std::ostringstream mouse_point_ss;
+		if (feedback->mouse_point_valid) {
+			mouse_point_ss << " at " << feedback->mouse_point.x << ", "
+					<< feedback->mouse_point.y << ", "
+					<< feedback->mouse_point.z << " in frame "
+					<< feedback->header.frame_id;
+		}
+
+		switch (feedback->event_type) {
+		case visualization_msgs::InteractiveMarkerFeedback::BUTTON_CLICK:
+			ROS_INFO_STREAM(
+					s.str() << ": button click" << mouse_point_ss.str() << ".");
+			break;
+
+		case visualization_msgs::InteractiveMarkerFeedback::MENU_SELECT:
+			ROS_INFO_STREAM(
+					s.str() << ": menu item " << feedback->menu_entry_id << " clicked" << mouse_point_ss.str() << ".");
+
+			switch (feedback->menu_entry_id) {
+
+			//"Pickup Nearest Segmented Object"
+			case 1:
+				pickup_nearest_segmented_object();
+				break;
+
+				//"Pickup by Surface Normal"
+			case 2:
+				pickup_with_normal();
+				break;
+
+				//"Pickup by Marker Pose"
+			case 3:
+				pickup_with_current_marker_pose();
+				break;
+				//Move to the current marker pose
+			case 4:
+				move_to_current_marker_pose();
+				break;
+
+			case 5:
+
+				detect_objects_on_table();
+				break;
+			}
+			break;
+
+		case visualization_msgs::InteractiveMarkerFeedback::POSE_UPDATE:
+			ROS_INFO_STREAM(
+					s.str() << ": pose changed" << "\nposition = " << feedback->pose.position.x << ", " << feedback->pose.position.y << ", " << feedback->pose.position.z << "\norientation = " << feedback->pose.orientation.w << ", " << feedback->pose.orientation.x << ", " << feedback->pose.orientation.y << ", " << feedback->pose.orientation.z << "\nframe: " << feedback->header.frame_id << " time: " << feedback->header.stamp.sec << "sec, " << feedback->header.stamp.nsec << " nsec");
+
+			currentMarkerPose.pose.orientation = feedback->pose.orientation;
+			currentMarkerPose.pose.position = feedback->pose.position;
+			currentMarkerPose.header.frame_id = feedback->header.frame_id;
+
+			break;
+
+		case visualization_msgs::InteractiveMarkerFeedback::MOUSE_DOWN:
+			ROS_INFO_STREAM(
+					s.str() << ": mouse down" << mouse_point_ss.str() << ".");
+			break;
+
+		case visualization_msgs::InteractiveMarkerFeedback::MOUSE_UP:
+			ROS_INFO_STREAM(
+					s.str() << ": mouse up" << mouse_point_ss.str() << ".");
+			break;
+		}
+
+		server->applyChanges();
 	}
 
 };
@@ -1349,16 +1652,29 @@ int main(int argc, char **argv) {
 	Pick_and_place_app *app = new Pick_and_place_app(&nh);
 
 	//Advertise pickup_object Service and use async callback queue.
-	ros::AdvertiseServiceOptions advertiseServiceOptions = ros::AdvertiseServiceOptions::create<std_srvs::Empty>("pickup_object",boost::bind(&Pick_and_place_app::pickup_callback, app, _1, _2), ros::VoidPtr(), &clicks_queue);
-	ros::ServiceServer pickup_object_srv = nh.advertiseService(advertiseServiceOptions);
+	ros::AdvertiseServiceOptions advertiseServiceOptions =
+			ros::AdvertiseServiceOptions::create<std_srvs::Empty>(
+					"pickup_object",
+					boost::bind(&Pick_and_place_app::pickup_callback, app, _1,
+							_2), ros::VoidPtr(), &clicks_queue);
+	ros::ServiceServer pickup_object_srv = nh.advertiseService(
+			advertiseServiceOptions);
 
 	//Advertise place_object Service and use async callback queue.
-	advertiseServiceOptions = ros::AdvertiseServiceOptions::create<std_srvs::Empty>("place_object",boost::bind(&Pick_and_place_app::place_callback, app, _1, _2), ros::VoidPtr(), &clicks_queue);
-	ros::ServiceServer place_object_srv = nh.advertiseService(advertiseServiceOptions);
+	advertiseServiceOptions = ros::AdvertiseServiceOptions::create<
+			std_srvs::Empty>("place_object",
+			boost::bind(&Pick_and_place_app::place_callback, app, _1, _2),
+			ros::VoidPtr(), &clicks_queue);
+	ros::ServiceServer place_object_srv = nh.advertiseService(
+			advertiseServiceOptions);
 
 	//Advertise "move_arm_out_of_the_way" Service and use async callback queue.
-	advertiseServiceOptions = ros::AdvertiseServiceOptions::create<std_srvs::Empty>("move_arm_out_of_the_way",boost::bind(&Pick_and_place_app::move_arm_out_of_the_way_callback, app, _1, _2), ros::VoidPtr(), &clicks_queue);
-	ros::ServiceServer move_arm_out_of_the_way_srv = nh.advertiseService(advertiseServiceOptions);
+	advertiseServiceOptions = ros::AdvertiseServiceOptions::create<
+			std_srvs::Empty>("move_arm_out_of_the_way",
+			boost::bind(&Pick_and_place_app::move_arm_out_of_the_way_callback,
+					app, _1, _2), ros::VoidPtr(), &clicks_queue);
+	ros::ServiceServer move_arm_out_of_the_way_srv = nh.advertiseService(
+			advertiseServiceOptions);
 
 	// Create a ROS subscriber for the input point cloud
 
@@ -1367,20 +1683,20 @@ int main(int argc, char **argv) {
 			&Pick_and_place_app::receive_cloud_CB, app);
 
 	//Async Queue for Clicks_queue, because the moveit functions like pickup, move don't return in synchronous callbacks
-	ros::SubscribeOptions options = ros::SubscribeOptions::create<geometry_msgs::PointStamped>("/clicked_point", 1, boost::bind(&Pick_and_place_app::receive_clicked_point_CB, app, _1)
-			, ros::VoidPtr(), &clicks_queue);
+	ros::SubscribeOptions options = ros::SubscribeOptions::create<
+			geometry_msgs::PointStamped>("/clicked_point", 1,
+			boost::bind(&Pick_and_place_app::receive_clicked_point_CB, app, _1),
+			ros::VoidPtr(), &clicks_queue);
 
 	ros::Subscriber rviz_click_subscriber = nh.subscribe(options);
 
 	ROS_INFO("Subscriped to point cloud and clicked_point");
 
-	ROS_INFO("Pick and Place v 0.1 ready to take commands.");
-
+	ROS_INFO("Pick and Place v 0.2 ready to take commands.");
 
 	//Async Spinner for Clicks_queue, because the moveit functions like pickup, move don't return in synchronous callbacks
 	ros::AsyncSpinner spinner(0, &clicks_queue);
 	spinner.start();
-
 
 	ros::spin();
 
