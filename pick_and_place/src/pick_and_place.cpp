@@ -1146,9 +1146,7 @@ public:
 
 		determine_normal_of_point_cloud_at_clicked_point();
 
-
-
-		//pickup();
+		pickup_nearest_segmented_object();
 
 	}
 
