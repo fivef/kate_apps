@@ -162,6 +162,8 @@ private:
 
 	std::vector<manipulation_msgs::GraspableObject> graspable_objects;
 
+	std::vector<std::string> collision_object_names;
+
 	//index of the object to pick up
 	int object_to_pick_ind;
 
@@ -198,6 +200,7 @@ private:
 	boost::shared_ptr<interactive_markers::InteractiveMarkerServer> server;
 	interactive_markers::MenuHandler menu_handler;
 
+
 public:
 
 	int object_in_gripper;
@@ -220,7 +223,7 @@ public:
 				1);
 
 		//the distance between the surface of the object to grasp and the GRIPPER_FRAME origin
-		nh.param<double>("OBJECT_GRIPPER_STANDOFF", STANDOFF, 0.4);
+		nh.param<double>("OBJECT_GRIPPER_STANDOFF", STANDOFF, -0.02);
 
 		nh.param<std::string>("ARM_BASE_LINK", ARM_BASE_LINK, "jaco_base_link");
 
@@ -271,6 +274,8 @@ public:
 		group->setEndEffectorLink(GRIPPER_FRAME);
 
 		group->setWorkspace(-0.5, -0.6, -0.3, 0.6, 0.6, 1.5);
+
+
 
 		//wait for get planning scene server
 
@@ -422,8 +427,6 @@ public:
 
 		ROS_INFO_STREAM("Picking up nearest segmented object");
 
-		ROS_INFO("Get nearest object");
-
 		detect_objects_on_table();
 
 		find_nearest_object();
@@ -433,9 +436,15 @@ public:
 		ROS_INFO_STREAM(
 				"Picking up Object: " << object_to_manipulate << " with " << pickup_grasps.size() << " grasps to try");
 
-		setMarkerPoseToFirstGrasp();
+		manipulation_msgs::Grasp normal_grasp = generateGraspFromNormal();
 
-		pickup();
+		pickup_grasps.push_back(normal_grasp);
+
+		//setMarkerToPoseStamped(normal_grasp.grasp_pose);
+
+		draw_grasps_to_try();
+
+		//pickup();
 
 		object_in_gripper = 1;
 
@@ -446,7 +455,7 @@ public:
 
 		generate_grasps_based_on_current_marker_pose();
 
-		create_dummy_collision_object(currentMarkerPose);
+		//create_dummy_collision_object(currentMarkerPose);
 
 		pickup();
 
@@ -490,7 +499,7 @@ public:
 
 		//group->setSupportSurfaceName("table");
 
-		draw_grasps_to_try();
+		//draw_grasps_to_try();
 
 		group->pick(object_to_manipulate, pickup_grasps);
 		//pickup_plan_only();
@@ -501,7 +510,6 @@ public:
 		//move_arm_out_of_the_way();
 
 		return 0;
-
 	}
 
 	bool open_gripper(){
@@ -527,6 +535,13 @@ public:
 
 		return true;
 
+	}
+
+	bool pickup_by_action_call(){
+
+
+
+		return true;
 	}
 
 	bool pickup_manually(){
@@ -780,8 +795,10 @@ public:
 			ROS_INFO("Action finished: %s", state.toString().c_str());
 
 			pickup_grasps.resize(0);
-			//pickup_grasps =
-					//plan_point_cluster_grasp_action_client.getResult()->grasps;
+			pickup_grasps =
+					plan_point_cluster_grasp_action_client.getResult()->grasps;
+
+			/*
 			std::vector<manipulation_msgs::Grasp> generated_grasps;
 
 			for(int i = 0; i < plan_point_cluster_grasp_action_client.getResult()->grasps.size(); i++){
@@ -791,6 +808,8 @@ public:
 			}
 
 			ROS_INFO_STREAM("Total grasps to try: " << pickup_grasps.size());
+
+			*/
 
 		} else
 			ROS_INFO("Action did not finish before the time out.");
@@ -852,6 +871,8 @@ public:
 
 		ROS_INFO_STREAM(
 				"Found objects count: " << process_call.response.collision_object_names.size());
+
+		collision_object_names = process_call.response.collision_object_names;
 
 
 
@@ -939,9 +960,9 @@ public:
 		std::vector<manipulation_msgs::Grasp> generated_grasps;
 
 
-		  static const double ANGLE_INC = M_PI / 24;
+		  static const double ANGLE_INC = M_PI / 20;
 
-		  static const double ANGLE_MAX = M_PI / 16;
+		  static const double ANGLE_MAX = M_PI / 18;
 
 
 		  tf::Transform transform;
@@ -957,11 +978,6 @@ public:
 		  tf::poseMsgToTF(pose_stamped.pose, pose);
 
 		  pose.setOrigin(tf::Vector3(0, 0, 0));
-
-
-		  double roll = 0.0;
-		  double pitch = 0.0;
-		  double yaw = 0.0;
 
 
 			for (double yaw = -ANGLE_MAX; yaw <= ANGLE_MAX; yaw += ANGLE_INC)
@@ -1020,13 +1036,13 @@ public:
 
 		g.approach.direction.vector.x = 1.0;
 		g.approach.direction.header.frame_id = GRIPPER_FRAME;
-		g.approach.min_distance = 0.02;
-		g.approach.desired_distance = 0.03;
+		g.approach.min_distance = 0.03;
+		g.approach.desired_distance = 0.25;
 
 		g.retreat.direction.header.frame_id = BASE_LINK;
 		g.retreat.direction.vector.z = 1.0;
-		g.retreat.min_distance = 0.02;
-		g.retreat.desired_distance = 0.03;
+		g.retreat.min_distance = 0.03;
+		g.retreat.desired_distance = 0.25;
 
 		g.pre_grasp_posture.header.frame_id = BASE_LINK;
 		g.pre_grasp_posture.header.stamp = ros::Time::now();
@@ -1055,8 +1071,10 @@ public:
 		g.grasp_posture.name[2] = FINGER_JOINT + "_3";
 		g.grasp_posture.position[2] = gripper_closed;
 
-		//g.allowed_touch_objects.resize(1);
-		//g.allowed_touch_objects[0] = "dummy";
+
+		//object allowd to be touche while approaching
+
+		g.allowed_touch_objects = collision_object_names;
 
 		ROS_DEBUG_STREAM("Grasp frame id: " << g.grasp_pose.header.frame_id);
 
@@ -1071,6 +1089,9 @@ public:
 
 		for (size_t i = 0; i < pickup_grasps.size(); ++i) {
 
+
+			makeSelectableMarker(i, pickup_grasps[i].grasp_pose);
+			/*
 			visualization_msgs::Marker marker;
 			marker.pose = pickup_grasps[i].grasp_pose.pose;
 
@@ -1093,17 +1114,8 @@ public:
 			marker.color.a = 1.0;
 
 
-			/*
-			marker.type = visualization_msgs::Marker::ARROW;
-			marker.scale.x = 0.05;
-			marker.scale.y = 0.005;
-			marker.scale.z = 0.005;
-			marker.color.r = 0;
-			marker.color.g = 1;
-			marker.color.b = 0;
-			marker.color.a = 1.0;
-			*/
 			vis_marker_publisher.publish(marker);
+			*/
 		}
 
 	}
@@ -1832,7 +1844,25 @@ public:
 		marker.color.r = 0.5;
 		marker.color.g = 0.5;
 		marker.color.b = 0.5;
-		marker.color.a = 1.0;
+		marker.color.a = 0.5;
+
+		return marker;
+	}
+
+	Marker makeBox6DOF(InteractiveMarker &msg) {
+
+		//TODO: make gripper nicer http://answers.ros.org/question/12840/drawing-the-pr2-gripper-in-rviz/
+		//https://github.com/ros-interactive-manipulation/pr2_object_manipulation/tree/groovy-devel/manipulation/pr2_marker_control/src
+		Marker marker;
+
+		marker.type = Marker::CUBE;
+		marker.scale.x = 0.03;
+		marker.scale.y = 0.1;
+		marker.scale.z = 0.01;
+		marker.color.r = 0;
+		marker.color.g = 1;
+		marker.color.b = 0;
+		marker.color.a = 0.9;
 
 		return marker;
 	}
@@ -1840,10 +1870,37 @@ public:
 	InteractiveMarkerControl& makeBoxControl(InteractiveMarker &msg) {
 		InteractiveMarkerControl control;
 		control.always_visible = true;
-		control.markers.push_back(makeBox(msg));
+		control.markers.push_back(makeBox6DOF(msg));
 		msg.controls.push_back(control);
 
 		return msg.controls.back();
+	}
+
+	void makeSelectableMarker(int id, geometry_msgs::PoseStamped pose){
+
+		InteractiveMarker int_marker;
+		int_marker.header.frame_id = BASE_LINK;
+
+		int_marker.pose = pose.pose;
+		int_marker.scale = 0.1;
+
+		InteractiveMarkerControl control;
+		control.interaction_mode = visualization_msgs::InteractiveMarkerControl::BUTTON;
+		control.markers.push_back(makeBox(int_marker));
+
+		int_marker.controls.push_back(control);
+
+		int_marker.name = "selectable_" + boost::lexical_cast<std::string>(id);
+		int_marker.description = "Selectable marker";
+
+		server->insert(int_marker);
+
+		server->setCallback(int_marker.name,
+				boost::bind(&Pick_and_place_app::processFeedback, this, _1));
+
+		server->applyChanges();
+
+		ROS_INFO("Interactive marker created");
 	}
 
 	void make6DofMarker() {
@@ -1860,13 +1917,11 @@ public:
 		menu_handler.insert("reset_collision_environment",
 				boost::bind(&Pick_and_place_app::processFeedback, this, _1));
 
+
 		InteractiveMarker int_marker;
 		int_marker.header.frame_id = BASE_LINK;
 
-		tf::Vector3 position;
 
-		position = tf::Vector3(0, 0, 0);
-		tf::pointTFToMsg(position, int_marker.pose.position);
 		int_marker.scale = 0.1;
 
 		int_marker.name = "simple_6dof";
@@ -1920,15 +1975,17 @@ public:
 		menu_handler.apply(*server, int_marker.name);
 
 		server->applyChanges();
+
+		ROS_INFO("Interactive marker created");
 	}
 
 	void setMarkerPoseToFirstGrasp() {
 
-		setMarkerToPose(pickup_grasps[0].grasp_pose);
+		setMarkerToPoseStamped(pickup_grasps[0].grasp_pose);
 
 	}
 
-	void setMarkerToPose(geometry_msgs::PoseStamped pose){
+	void setMarkerToPoseStamped(geometry_msgs::PoseStamped pose){
 
 		InteractiveMarker int_marker;
 		server->get("simple_6dof", int_marker);
@@ -1981,6 +2038,7 @@ public:
 
 				//"Pickup by Marker Pose"
 			case 3:
+				currentMarkerPose.pose = feedback->pose;
 				pickup_with_current_marker_pose();
 				break;
 				//Move to the current marker pose
@@ -2003,6 +2061,7 @@ public:
 			currentMarkerPose.pose.orientation = feedback->pose.orientation;
 			currentMarkerPose.pose.position = feedback->pose.position;
 			currentMarkerPose.header.frame_id = feedback->header.frame_id;
+			setMarkerToPoseStamped(currentMarkerPose);
 
 			break;
 
