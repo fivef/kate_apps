@@ -48,6 +48,9 @@ using namespace visualization_msgs;
 #include <moveit/move_group_interface/move_group.h>
 #include <moveit_msgs/GetPlanningScene.h>
 #include <moveit_msgs/PlanningSceneComponents.h>
+#include <moveit_msgs/PickupAction.h>
+#include <moveit_msgs/PickupGoal.h>
+
 #include <shape_tools/solid_primitive_dims.h>
 
 // PCL specific includes
@@ -96,9 +99,6 @@ class Pick_and_place_app {
 
 private:
 	static const int DEBUG = true;
-
-	//1 normal directly selects grasp pose / 0 nearest objects to selected point is grasped
-	int DIRECTLY_SELECT_GRASP_POSE;
 
 	static const float place_position_tolerance_in_meter = 0.03;
 	static const float place_planner_step_size_in_meter = 0.005;
@@ -219,9 +219,6 @@ public:
 		//get parameters from parameter server
 		nh.param<int>("sim", sim, 0);
 
-		nh.param<int>("DIRECTLY_SELECT_GRASP_POSE", DIRECTLY_SELECT_GRASP_POSE,
-				1);
-
 		//the distance between the surface of the object to grasp and the GRIPPER_FRAME origin
 		nh.param<double>("OBJECT_GRIPPER_STANDOFF", STANDOFF, -0.02);
 
@@ -269,7 +266,11 @@ public:
 		//group->setGoalOrientationTolerance(0.005);
 		group->setPlannerId("RRTConnectkConfigDefault");
 
+		group->setPoseReferenceFrame(BASE_LINK);
+
 		group->allowReplanning(true);
+
+		group->setEndEffector("gripper");
 
 		group->setEndEffectorLink(GRIPPER_FRAME);
 
@@ -537,13 +538,6 @@ public:
 
 	}
 
-	bool pickup_by_action_call(){
-
-
-
-		return true;
-	}
-
 	bool pickup_manually(){
 
 		geometry_msgs::PoseStamped graspPose = currentMarkerPose;
@@ -665,11 +659,27 @@ public:
 
 	int pickup_plan_only(){
 
+		ROS_INFO("Pickup plan only");
+
 		//pickup_grasps[0].
 
 		moveit_msgs::PickupGoal pickupGoal;
 
+		pickupGoal.target_name = object_to_manipulate;
+		pickupGoal.group_name = ARM_NAME;
+		pickupGoal.end_effector = "gripper";
+		pickupGoal.support_surface_name = "table";
+		pickupGoal.allowed_planning_time = 5.0;
+
+		moveit_msgs::PlanningOptions planning_options;
+		planning_options.plan_only = true;
+
+
+		pickupGoal.planning_options = planning_options;
+
+
 		//pickupGoal.header;
+		//pickupGoal.
 
 		pickupGoal.possible_grasps = pickup_grasps;
 
@@ -1066,7 +1076,7 @@ public:
 		g.grasp_posture.position[0] = gripper_closed;
 
 		g.grasp_posture.name[1] = FINGER_JOINT + "_2";
-		g.grasp_posture.position[1] = gripper_open;
+		g.grasp_posture.position[1] = gripper_closed;
 
 		g.grasp_posture.name[2] = FINGER_JOINT + "_3";
 		g.grasp_posture.position[2] = gripper_closed;
@@ -1074,7 +1084,8 @@ public:
 
 		//object allowd to be touche while approaching
 
-		g.allowed_touch_objects = collision_object_names;
+		g.allowed_touch_objects.resize(1);
+		g.allowed_touch_objects[0] = "all";
 
 		ROS_DEBUG_STREAM("Grasp frame id: " << g.grasp_pose.header.frame_id);
 
@@ -1086,6 +1097,8 @@ public:
 	}
 
 	void draw_grasps_to_try() {
+
+		ROS_INFO("Draw grasps to try");
 
 		for (size_t i = 0; i < pickup_grasps.size(); ++i) {
 
@@ -2043,8 +2056,8 @@ public:
 				break;
 				//Move to the current marker pose
 			case 4:
-				move_to_current_marker_pose();
-				//pickup_manually();
+				//move_to_current_marker_pose();
+				pickup_plan_only();
 				break;
 
 			case 5:
