@@ -71,20 +71,13 @@ using namespace visualization_msgs;
 const std::string OBJECT_DETECTION_SERVICE_NAME = "/object_detection";
 const std::string COLLISION_PROCESSING_SERVICE_NAME =
 		"/tabletop_collision_map_processing/tabletop_collision_map_processing";
-
 const std::string PICKUP_ACTION_NAME = "/pickup/goal";
-const std::string COLLIDER_RESET_SERVICE_NAME = "/collider_node/reset";
-
 const std::string GET_PLANNING_SCENE_SERVICE_NAME = "/get_planning_scene";
-
 const std::string PLAN_POINT_CLUSTER_GRASP_SERVICE_NAME =
 		"/plan_point_cluster_grasp";
-
 const std::string EVALUATE_POINT_CLUSTER_GRASP_SERVICE_NAME =
 		"/evaluate_point_cluster_grasps";
 
-static const std::string CLUSTER_BOUNDING_BOX2_3D_NAME =
-		"find_cluster_bounding_box2_3d";
 
 //! General base class for all exceptions originating in the collision map interface
 class CollisionMapException: public std::runtime_error {
@@ -313,10 +306,6 @@ public:
 				nh.serviceClient<
 						tabletop_collision_map_processing::TabletopCollisionMapProcessing>(
 						COLLISION_PROCESSING_SERVICE_NAME, true);
-
-		cluster_bounding_box2_3d_client_ = nh.serviceClient<
-				object_manipulation_msgs::FindClusterBoundingBox2>(
-				CLUSTER_BOUNDING_BOX2_3D_NAME, true);
 
 		evaluate_point_cluster_grasp_srv_client = nh.serviceClient<
 				manipulation_msgs::GraspPlanning>(
@@ -710,26 +699,6 @@ public:
 
 	}
 
-	void getClusterBoundingBox3D(const sensor_msgs::PointCloud2 &cluster,
-			geometry_msgs::PoseStamped &pose_stamped,
-			geometry_msgs::Vector3 &dimensions) {
-		ROS_INFO("GetClusterBoundingBox3D");
-
-		object_manipulation_msgs::FindClusterBoundingBox2 srv;
-		srv.request.cluster = cluster;
-		if (!cluster_bounding_box2_3d_client_.call(srv.request, srv.response)) {
-			ROS_ERROR("Failed to call cluster bounding box client");
-			throw CollisionMapException(
-					"Failed to call cluster bounding box client");
-		}
-		pose_stamped = srv.response.pose;
-		dimensions = srv.response.box_dims;
-		if (dimensions.x == 0.0 && dimensions.y == 0.0 && dimensions.z == 0.0) {
-			ROS_ERROR(
-					"Cluster bounding box 2 3d client returned an error (0.0 bounding box)");
-			throw CollisionMapException("Bounding box computation failed");
-		}
-	}
 
 	/*
 	void draw_selected_cluster() {
