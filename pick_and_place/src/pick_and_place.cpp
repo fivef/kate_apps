@@ -50,6 +50,7 @@ using namespace visualization_msgs;
 #include <moveit_msgs/PlanningSceneComponents.h>
 #include <moveit_msgs/PickupAction.h>
 #include <moveit_msgs/PickupGoal.h>
+#include <moveit_msgs/ExecuteKnownTrajectory.h>
 
 #include <shape_tools/solid_primitive_dims.h>
 
@@ -71,12 +72,14 @@ using namespace visualization_msgs;
 const std::string OBJECT_DETECTION_SERVICE_NAME = "/object_detection";
 const std::string COLLISION_PROCESSING_SERVICE_NAME =
 		"/tabletop_collision_map_processing/tabletop_collision_map_processing";
-const std::string PICKUP_ACTION_NAME = "/pickup/goal";
+const std::string PICKUP_ACTION_NAME = "/pickup";
 const std::string GET_PLANNING_SCENE_SERVICE_NAME = "/get_planning_scene";
 const std::string PLAN_POINT_CLUSTER_GRASP_SERVICE_NAME =
 		"/plan_point_cluster_grasp";
 const std::string EVALUATE_POINT_CLUSTER_GRASP_SERVICE_NAME =
 		"/evaluate_point_cluster_grasps";
+
+const std::string EXECUTE_KINEMATIC_PATH_SERVICE_NAME = "/execute_kinematic_path";
 
 
 //! General base class for all exceptions originating in the collision map interface
@@ -183,6 +186,7 @@ private:
 	ros::ServiceClient collider_reset_srv;
 	ros::ServiceClient get_planning_scene_srv;
 	ros::ServiceClient evaluate_point_cluster_grasp_srv_client;
+	ros::ServiceClient execute_kinematic_path_srv;
 
 	actionlib::SimpleActionClient<manipulation_msgs::GraspPlanningAction> plan_point_cluster_grasp_action_client;
 
@@ -311,6 +315,8 @@ public:
 				manipulation_msgs::GraspPlanning>(
 				EVALUATE_POINT_CLUSTER_GRASP_SERVICE_NAME, true);
 
+		execute_kinematic_path_srv = nh.serviceClient<moveit_msgs::ExecuteKnownTrajectory>(EXECUTE_KINEMATIC_PATH_SERVICE_NAME);
+
 		vis_marker_publisher = nh.advertise<visualization_msgs::Marker>(
 				"pick_and_place_markers", 128);
 
@@ -428,13 +434,15 @@ public:
 
 		manipulation_msgs::Grasp normal_grasp = generateGraspFromNormal();
 
-		pickup_grasps.push_back(normal_grasp);
 
-		//setMarkerToPoseStamped(normal_grasp.grasp_pose);
+		//pickup_grasps.push_back(normal_grasp);
+		pickup_grasps.at(0) = normal_grasp;
 
-		draw_grasps_to_try();
+		setMarkerToPoseStamped(pickup_grasps.at(0).grasp_pose);
 
-		//pickup();
+		draw_pickup_grasps_to_try();
+
+		pickup_plan_only();
 
 		object_in_gripper = 1;
 
@@ -503,6 +511,7 @@ public:
 	}
 
 	bool open_gripper(){
+		gripper->setStartStateToCurrentState();
 
 		gripper->setJointValueTarget(FINGER_JOINT + "_1", gripper_open);
 		gripper->setJointValueTarget(FINGER_JOINT + "_2", gripper_open);
@@ -516,6 +525,7 @@ public:
 	}
 
 	bool close_gripper(){
+		gripper->setStartStateToCurrentState();
 
 		gripper->setJointValueTarget(FINGER_JOINT + "_1", gripper_closed);
 		gripper->setJointValueTarget(FINGER_JOINT + "_2", gripper_closed);
@@ -533,9 +543,9 @@ public:
 		geometry_msgs::PoseStamped preGraspPose;
 		preGraspPose.header = graspPose.header;
 
-		create_dummy_collision_object(graspPose);
+		//create_dummy_collision_object(graspPose);
 
-		//Shit graspPose -0.1 m to get the preGraspPose
+		//Shift graspPose -0.1 m to get the preGraspPose
 		tf::Transform position;
 		tf::Transform standoff;
 		tf::Transform rotation;
@@ -558,15 +568,19 @@ public:
 
 		preGraspPose.pose = shifted_pose;
 
-		open_gripper();
 
+		ROS_INFO("//PHASE 1 // moving to pregrasp pose");
+
+		group->setStartStateToCurrentState();
 
 		group->setPoseTarget(preGraspPose, GRIPPER_FRAME);
 		group->move();
 
 		//setMarkerToPose(pose);
 
+		ROS_INFO("//PHASE 2 // open gripper");
 
+		open_gripper();
 
 		ROS_INFO_STREAM("Collision matrix size " << planningSceneMonitor->getPlanningScene()->getAllowedCollisionMatrix().getSize());
 
@@ -588,8 +602,11 @@ public:
 		waypoints.push_back(graspPose.pose);
 
 		moveit_msgs::RobotTrajectory trajectory;
-		double eef_step_size = 0.04;
-		double jump_factor= 5;
+
+		moveit_msgs::ExecuteKnownTrajectory srv;
+
+		double eef_step_size = 0.01;
+		double jump_factor= 10000;
 		bool avoid_collisions = false;
 
 		/*
@@ -601,27 +618,20 @@ public:
 		 * Return a value that is between 0.0 and 1.0 indicating the fraction of the path achieved as described by the waypoints.
 		 * Return -1.0 in case of error.
 		 */
-		double fraction_of_path_achieved = group->computeCartesianPath(waypoints, eef_step_size, jump_factor, trajectory, avoid_collisions);
+		double fraction_of_path_achieved = group->computeCartesianPath(waypoints, eef_step_size, jump_factor, srv.request.trajectory, avoid_collisions);
 
 		ROS_INFO_STREAM(fraction_of_path_achieved << " of the path achieved!");
 
+		ROS_INFO("//PHASE 3 // moving to grasp pose");
+		srv.request.wait_for_execution = true;
+		execute_kinematic_path_srv.call(srv);
+
 		moveit::planning_interface::MoveGroup::Plan plan;
-
-		//plan.start_state_ = group->get;
-		plan.trajectory_ = trajectory;
-
-		group->execute(plan);
-		//group->plan()
-
-		//group->setPoseTarget(graspPose, GRIPPER_FRAME);
-		//group->move();
 
 
 		attach_object_to_gripper();
 
 		close_gripper();
-
-
 
 		return true;
 	}
@@ -659,6 +669,7 @@ public:
 		pickupGoal.end_effector = "gripper";
 		pickupGoal.support_surface_name = "table";
 		pickupGoal.allowed_planning_time = 5.0;
+		//pickupGoal.minimize_object_distance = true; Does this work?
 
 		moveit_msgs::PlanningOptions planning_options;
 		planning_options.plan_only = true;
@@ -671,6 +682,10 @@ public:
 		//pickupGoal.
 
 		pickupGoal.possible_grasps = pickup_grasps;
+
+		ROS_INFO_STREAM("Pickup Plan: Pickup Grasps size: " << pickup_grasps.size());
+
+		ROS_INFO_STREAM("Pickup Plan: Grasp Pose: " << pickup_grasps[0].grasp_pose);
 
 		pickup_action_client.sendGoal(pickupGoal);
 
@@ -687,8 +702,10 @@ public:
 					pickup_action_client.getState();
 			ROS_INFO("Action finished: %s", state.toString().c_str());
 
+			if(state == actionlib::SimpleClientGoalState::SUCCEEDED){
+				return 1;
+			}else return 0;
 
-			//plan_point_cluster_grasp_action_client.getResult()->grasps;
 
 		} else
 			ROS_INFO("Action did not finish before the time out.");
@@ -934,6 +951,136 @@ public:
 
 	}
 
+	void do_reachability_test(){
+
+
+		std::vector<manipulation_msgs::Grasp> test_grasps = generate_test_grasps();
+
+		draw_grasps(test_grasps);
+
+		int successful_grasps_counter = 0;
+
+		ROS_INFO_STREAM("Test grasps");
+
+		for(size_t i = 0 ; i <= test_grasps.size(); i++){
+
+			pickup_grasps.resize(1);
+			pickup_grasps[0] = test_grasps[i];
+
+			ROS_INFO_STREAM("Test grasp no " << i);
+
+			ROS_INFO_STREAM("Grasp Pose: " << pickup_grasps[0].grasp_pose);
+
+
+			/*
+			//test moving to pose
+			group->setPoseTarget(pickup_grasps[0].grasp_pose);
+
+			moveit::planning_interface::MoveGroup::Plan plan;
+
+			if(group->plan(plan)){
+
+				successful_grasps_counter++;
+
+				setSelectableMarkerToGreen(i);
+
+			}else{
+				setSelectableMarkerToRed(i);
+			}
+			*/
+
+			//test pickup_plan_only
+
+			if(pickup_plan_only()){
+
+				successful_grasps_counter++;
+
+				setSelectableMarkerToGreen(i);
+
+			}else{
+				setSelectableMarkerToRed(i);
+			}
+
+
+
+		}
+
+		ROS_INFO_STREAM(successful_grasps_counter << " grasps out of " << test_grasps.size() << " were successful.");
+
+
+	}
+
+	/*
+	 * generates a series of grasps for reachability testing
+	 */
+	std::vector<manipulation_msgs::Grasp> generate_test_grasps(){
+
+		//startPoint and endPoint define a box.
+
+		/*
+		geometry_msgs::Point startPoint;
+		startPoint.x = 0;
+		startPoint.y = -1;
+		startPoint.z = 0;
+		geometry_msgs::Point endPoint;
+		endPoint.x = 1;
+		endPoint.y = 1;
+		endPoint.z = 1.5;
+		*/
+
+		geometry_msgs::Point startPoint;
+		startPoint.x = 0;
+		startPoint.y = -0.9;
+		startPoint.z = 0.4;
+		geometry_msgs::Point endPoint;
+		endPoint.x = 0.8;
+		endPoint.y = 0.9;
+		endPoint.z = 1.2;
+
+		double step_size = 0.2;
+
+		std::vector<manipulation_msgs::Grasp> generated_grasps;
+
+		geometry_msgs::PoseStamped pose;
+
+
+		tf::Transform pose_tf;
+
+		pose_tf.setOrigin(tf::Vector3(0,0,0));
+		pose_tf.setRotation(tf::createIdentityQuaternion());
+
+		tf::Transform transform;
+
+		transform.setRotation(tf::createIdentityQuaternion());
+
+
+		for(double x = startPoint.x; x <= endPoint.x ; x += step_size ){
+
+			for(double y = startPoint.y; y <= endPoint.y ; y += step_size ){
+
+				for(double z = startPoint.z; z <= endPoint.z ; z += step_size ){
+
+					transform.setOrigin(tf::Vector3(x,y,z));
+
+					tf::poseTFToMsg(transform * pose_tf,pose.pose);
+
+					pose.header.frame_id = BASE_LINK;
+
+					ROS_INFO_STREAM("Grasp Pose: " << pose);
+
+					generated_grasps.push_back(create_grasp_out_of_pose_stamped(pose));
+
+				}
+			}
+
+
+		}
+
+		ROS_INFO_STREAM(generated_grasps.size() << " test grasps generated.");
+
+		return generated_grasps;
+	}
+
 	std::vector<manipulation_msgs::Grasp> generate_grasps_for_pose_stamped(geometry_msgs::PoseStamped pose_stamped){
 
 		std::vector<manipulation_msgs::Grasp> generated_grasps;
@@ -1065,40 +1212,26 @@ public:
 
 	}
 
-	void draw_grasps_to_try() {
+	void draw_grasps(std::vector<manipulation_msgs::Grasp> grasps){
 
-		ROS_INFO("Draw grasps to try");
+		ROS_INFO("Draw grasps");
 
-		for (size_t i = 0; i < pickup_grasps.size(); ++i) {
-
-
-			makeSelectableMarker(i, pickup_grasps[i].grasp_pose);
-			/*
-			visualization_msgs::Marker marker;
-			marker.pose = pickup_grasps[i].grasp_pose.pose;
-
-			//marker.pose = normalPose.pose;
-			marker.header.frame_id =
-					pickup_grasps[i].grasp_pose.header.frame_id;
-			marker.id = i;
-			marker.ns = "generated_pickup_grasp";
-			marker.header.stamp = ros::Time::now();
-			marker.action = visualization_msgs::Marker::ADD;
-			marker.lifetime = ros::Duration(30);
-
-			marker.type = Marker::CUBE;
-			marker.scale.x = 0.03;
-			marker.scale.y = 0.1;
-			marker.scale.z = 0.01;
-			marker.color.r = 0.5;
-			marker.color.g = 0.5;
-			marker.color.b = 0.5;
-			marker.color.a = 1.0;
+		for (size_t i = 0; i <= grasps.size(); i++) {
 
 
-			vis_marker_publisher.publish(marker);
-			*/
+			makeSelectableMarker(i, grasps[i].grasp_pose);
+
 		}
+
+
+	}
+
+	void draw_pickup_grasps_to_try() {
+
+		ROS_INFO("Draw pickup grasps to try");
+
+		draw_grasps(pickup_grasps);
+
 
 	}
 
@@ -1875,26 +2008,59 @@ public:
 		int_marker.name = "selectable_" + boost::lexical_cast<std::string>(id);
 		int_marker.description = "Selectable marker";
 
+		ROS_INFO_STREAM("Created marker: " << int_marker.name);
+
 		server->insert(int_marker);
+
 
 		server->setCallback(int_marker.name,
 				boost::bind(&Pick_and_place_app::processFeedback, this, _1));
 
 		server->applyChanges();
+	}
 
-		ROS_INFO("Interactive marker created");
+	void setSelectableMarkerToGreen(int id){
+
+		InteractiveMarker int_marker;
+
+		server->get("selectable_" + boost::lexical_cast<std::string>(id),int_marker);
+
+		int_marker.controls[0].markers[0].color.r = 0;
+		int_marker.controls[0].markers[0].color.g = 1;;
+		int_marker.controls[0].markers[0].color.b = 0;
+		int_marker.controls[0].markers[0].color.a = 0.9;
+
+		server->insert(int_marker);
+
+		server->applyChanges();
+	}
+
+	void setSelectableMarkerToRed(int id){
+
+		InteractiveMarker int_marker;
+
+		server->get("selectable_" + boost::lexical_cast<std::string>(id),int_marker);
+
+		int_marker.controls[0].markers[0].color.r = 1;
+		int_marker.controls[0].markers[0].color.g = 0;;
+		int_marker.controls[0].markers[0].color.b = 0;
+		int_marker.controls[0].markers[0].color.a = 0.9;
+
+		server->insert(int_marker);
+
+		server->applyChanges();
 	}
 
 	void make6DofMarker() {
 
 		//menu
-		menu_handler.insert("Pickup Nearest Segmented Object",
+		menu_handler.insert("Grasp",
 				boost::bind(&Pick_and_place_app::processFeedback, this, _1));
-		menu_handler.insert("Pickup by Surface Normal",
+		menu_handler.insert("Grasp Manually",
 				boost::bind(&Pick_and_place_app::processFeedback, this, _1));
-		menu_handler.insert("Pickup by Marker Pose",
+		menu_handler.insert("Pickup Plan only",
 				boost::bind(&Pick_and_place_app::processFeedback, this, _1));
-		menu_handler.insert("move_to_current_marker_pose",
+		menu_handler.insert("Reachability Test",
 				boost::bind(&Pick_and_place_app::processFeedback, this, _1));
 		menu_handler.insert("reset_collision_environment",
 				boost::bind(&Pick_and_place_app::processFeedback, this, _1));
@@ -2008,25 +2174,24 @@ public:
 
 			switch (feedback->menu_entry_id) {
 
-			//"Pickup Nearest Segmented Object"
+			//"Grasp"
 			case 1:
-				pickup_nearest_segmented_object();
-				break;
-
-				//"Pickup by Surface Normal"
-			case 2:
-				pickup_with_normal();
-				break;
-
-				//"Pickup by Marker Pose"
-			case 3:
 				currentMarkerPose.pose = feedback->pose;
 				pickup_with_current_marker_pose();
 				break;
-				//Move to the current marker pose
-			case 4:
-				//move_to_current_marker_pose();
+
+			//Pickup manually
+			case 2:
+				pickup_manually();
+				break;
+
+			//"Plan only"
+			case 3:
 				pickup_plan_only();
+				break;
+			//Reachability test
+			case 4:
+				do_reachability_test();
 				break;
 
 			case 5:
