@@ -524,15 +524,6 @@ public:
 
 	bool open_gripper(bool plan_only = false){
 
-		std::vector<string> joint_names = gripper->getJointValueTarget().getJointNames();
-
-		for(int i = 0; i < joint_names.size(); i++){
-			ROS_INFO_STREAM("Joint states before gripper open: " << joint_names[i]);
-		}
-
-		//gripper->setStartStateToCurrentState();
-
-
 		gripper->setJointValueTarget("jaco_joint_6",gripper->getCurrentJointValues()[0]);
 
 		gripper->setJointValueTarget(FINGER_JOINT + "_1", gripper_open);
@@ -554,9 +545,7 @@ public:
 	}
 
 	bool close_gripper(bool plan_only = false){
-		//gripper->setStartStateToCurrentState();
 
-		//gripper->setJointValueTarget(gripper->getJointValueTarget());
 		gripper->setJointValueTarget("jaco_joint_6",gripper->getCurrentJointValues()[0]);
 
 		gripper->setJointValueTarget(FINGER_JOINT + "_1", gripper_closed);
@@ -580,7 +569,9 @@ public:
 
 		geometry_msgs::PoseStamped graspPose = currentMarkerPose;
 		geometry_msgs::PoseStamped preGraspPose;
+		geometry_msgs::PoseStamped retreatPose;
 		preGraspPose.header = graspPose.header;
+		retreatPose.header = graspPose.header;
 
 		//create_dummy_collision_object(graspPose);
 
@@ -590,6 +581,9 @@ public:
 		tf::Transform rotation;
 
 		tf::Quaternion quaternion;
+
+		ROS_INFO_STREAM("pose before msg to tf " << graspPose.pose);
+
 		tf::quaternionMsgToTF(graspPose.pose.orientation,quaternion);
 
 		position.setIdentity();
@@ -679,7 +673,7 @@ public:
 		double fraction_of_path_achieved = group->computeCartesianPath(waypoints, eef_step_size, jump_factor, srv.request.trajectory, avoid_collisions);
 
 		if(fraction_of_path_achieved < 0.9){
-			ROS_INFO_STREAM("Failed at Cartesian Path: " << fraction_of_path_achieved << " < 0.9");
+			ROS_INFO_STREAM("Failed at approach Cartesian path: " << fraction_of_path_achieved << " < 0.9");
 			return false;
 		}
 
@@ -692,6 +686,7 @@ public:
 		//it would be better to disable collisions completely here
 		remove_collision_object_from_scene(object_to_manipulate_object);
 
+		ROS_INFO("//PHASE 4 // close gripper and attach object");
 		if(close_gripper(plan_only)){
 
 		}else{
@@ -700,6 +695,37 @@ public:
 		}
 
 		attach_object_to_gripper(object_to_manipulate_object);
+
+		ROS_INFO("//PHASE 5 // retreat");
+
+		//reusing the objects from approach
+
+		position.setIdentity();
+		position.setOrigin(tf::Vector3(graspPose.pose.position.x, graspPose.pose.position.y, graspPose.pose.position.z));
+
+		standoff.setIdentity();
+		standoff.setOrigin(tf::Vector3(0,0,0.1));
+
+		tf::poseTFToMsg(standoff * position, shifted_pose);
+
+		retreatPose.pose = shifted_pose;
+
+		//compute cartesian path for retreat reusing the objects from above
+		waypoints.resize(0);
+		waypoints.push_back(graspPose.pose);
+		waypoints.push_back(retreatPose.pose);
+
+		fraction_of_path_achieved = group->computeCartesianPath(waypoints, eef_step_size, jump_factor, srv.request.trajectory, avoid_collisions);
+
+		if(fraction_of_path_achieved < 0.5){
+			ROS_INFO_STREAM("Failed at retreat Cartesian path: " << fraction_of_path_achieved << " < 0.9");
+			return false;
+		}
+
+		if(!plan_only){
+			srv.request.wait_for_execution = true;
+			execute_kinematic_path_srv.call(srv);
+		}
 
 		return true;
 	}
@@ -716,6 +742,12 @@ public:
 		attached_object.link_name = GRIPPER_FRAME;
 
 		attached_object.object = collision_object;
+
+		attached_object.touch_links.push_back("jaco_finger_link_1");
+		attached_object.touch_links.push_back("jaco_finger_link_2");
+		attached_object.touch_links.push_back("jaco_finger_link_3");
+		attached_object.touch_links.push_back("jaco_link_6");
+
 
 		attached_object_publisher.publish(attached_object);
 
@@ -1090,7 +1122,7 @@ public:
 				break;
 			case 2:
 				//pickup with manual pick function
-				if(pickup_manually(false)){
+				if(pickup_manually()){
 
 					successful_grasps_counter++;
 
@@ -1278,7 +1310,7 @@ public:
 		g.approach.min_distance = 0.03;
 		g.approach.desired_distance = 0.15;
 
-		g.retreat.direction.header.frame_id = GRIPPER_FRAME;
+		g.retreat.direction.header.frame_id = BASE_LINK;
 		g.retreat.direction.vector.z = 1.0;
 		g.retreat.min_distance = 0.03;
 		g.retreat.desired_distance = 0.15;
