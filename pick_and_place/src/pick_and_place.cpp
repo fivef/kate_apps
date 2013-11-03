@@ -119,9 +119,10 @@ private:
 
 	std::string ARM_NAME;
 
-	static const int NORMAL = 1;
-	static const int SEGMENTED_OBJECT_SELECTION = 2;
-	std::string WORKING_MODE;
+	static const int MOVE_TO = 0;
+	static const int PICKUP_PLAN_ONLY = 1;
+	static const int PICKUP_MANUAL = 2;
+	std::string TEST_MODE;
 
 	geometry_msgs::PointStamped desired_pickup_point;
 
@@ -510,34 +511,55 @@ public:
 		return 0;
 	}
 
-	bool open_gripper(){
+	bool open_gripper(bool plan_only = false){
+
+		std::vector<string> joint_names = gripper->getJointValueTarget().getJointNames();
+
+		for(int i = 0; i < joint_names.size(); i++){
+			ROS_INFO_STREAM("Joint states before gripper open: " << joint_names[i]);
+		}
+
 		gripper->setStartStateToCurrentState();
 
 		gripper->setJointValueTarget(FINGER_JOINT + "_1", gripper_open);
 		gripper->setJointValueTarget(FINGER_JOINT + "_2", gripper_open);
 		gripper->setJointValueTarget(FINGER_JOINT + "_3", gripper_open);
 
-		gripper->move();
+		if(plan_only){
+
+			moveit::planning_interface::MoveGroup::Plan plan;
+			if(!gripper->plan(plan)) return false;
+
+		}else{
+			gripper->move();
+		}
 
 
 		return true;
 
 	}
 
-	bool close_gripper(){
+	bool close_gripper(bool plan_only = false){
 		gripper->setStartStateToCurrentState();
 
 		gripper->setJointValueTarget(FINGER_JOINT + "_1", gripper_closed);
 		gripper->setJointValueTarget(FINGER_JOINT + "_2", gripper_closed);
 		gripper->setJointValueTarget(FINGER_JOINT + "_3", gripper_closed);
 
-		gripper->move();
+		if(plan_only){
+
+			moveit::planning_interface::MoveGroup::Plan plan;
+			if(!gripper->plan(plan)) return false;
+
+		}else{
+			gripper->move();
+		}
 
 		return true;
 
 	}
 
-	bool pickup_manually(){
+	bool pickup_manually(bool plan_only = false){
 
 		geometry_msgs::PoseStamped graspPose = currentMarkerPose;
 		geometry_msgs::PoseStamped preGraspPose;
@@ -574,13 +596,31 @@ public:
 		group->setStartStateToCurrentState();
 
 		group->setPoseTarget(preGraspPose, GRIPPER_FRAME);
-		group->move();
+
+		if(plan_only){
+			moveit::planning_interface::MoveGroup::Plan plan;
+			if(!group->plan(plan)){
+				ROS_INFO("Pregrasp failed");
+				return false;
+			}
+		}else{
+			group->move();
+
+		}
+
+
+
 
 		//setMarkerToPose(pose);
 
 		ROS_INFO("//PHASE 2 // open gripper");
 
-		open_gripper();
+		if(open_gripper(plan_only)){
+
+		}else{
+			ROS_INFO("Open gripper failed");
+			return false;
+		}
 
 		ROS_INFO_STREAM("Collision matrix size " << planningSceneMonitor->getPlanningScene()->getAllowedCollisionMatrix().getSize());
 
@@ -596,6 +636,7 @@ public:
 		//planningSceneMonitor->getPlanningScene()->getAllowedCollisionMatrixNonConst().setEntry("dummy",FINGER_JOINT + "_1",true);
 
 
+		ROS_INFO("//PHASE 3 // moving to grasp pose");
 
 		std::vector<geometry_msgs::Pose> waypoints;
 		waypoints.push_back(preGraspPose.pose);
@@ -620,18 +661,26 @@ public:
 		 */
 		double fraction_of_path_achieved = group->computeCartesianPath(waypoints, eef_step_size, jump_factor, srv.request.trajectory, avoid_collisions);
 
-		ROS_INFO_STREAM(fraction_of_path_achieved << " of the path achieved!");
+		if(fraction_of_path_achieved < 0.9){
+			ROS_INFO_STREAM("Failed at Cartesian Path: " << fraction_of_path_achieved << " < 0.9");
+			return false;
+		}
 
-		ROS_INFO("//PHASE 3 // moving to grasp pose");
-		srv.request.wait_for_execution = true;
-		execute_kinematic_path_srv.call(srv);
-
-		moveit::planning_interface::MoveGroup::Plan plan;
+		if(!plan_only){
+			srv.request.wait_for_execution = true;
+			execute_kinematic_path_srv.call(srv);
+		}
 
 
 		attach_object_to_gripper();
 
-		close_gripper();
+
+		if(close_gripper(plan_only)){
+
+		}else{
+			ROS_INFO("Close gripper failed");
+			return false;
+		}
 
 		return true;
 	}
@@ -951,7 +1000,9 @@ public:
 
 	}
 
-	void do_reachability_test(){
+	void do_reachability_test(int type){
+
+		moveit::planning_interface::MoveGroup::Plan plan;
 
 
 		std::vector<manipulation_msgs::Grasp> test_grasps = generate_test_grasps();
@@ -960,7 +1011,7 @@ public:
 
 		int successful_grasps_counter = 0;
 
-		ROS_INFO_STREAM("Test grasps");
+		ROS_INFO_STREAM("Test grasps type " << type);
 
 		for(size_t i = 0 ; i <= test_grasps.size(); i++){
 
@@ -971,36 +1022,54 @@ public:
 
 			ROS_INFO_STREAM("Grasp Pose: " << pickup_grasps[0].grasp_pose);
 
+			switch(type){
 
-			/*
-			//test moving to pose
-			group->setPoseTarget(pickup_grasps[0].grasp_pose);
+			case 0:
+				//test moving to pose
 
-			moveit::planning_interface::MoveGroup::Plan plan;
+				group->setPoseTarget(pickup_grasps[0].grasp_pose);
 
-			if(group->plan(plan)){
 
-				successful_grasps_counter++;
 
-				setSelectableMarkerToGreen(i);
+				if(group->plan(plan)){
 
-			}else{
-				setSelectableMarkerToRed(i);
+					successful_grasps_counter++;
+
+					setSelectableMarkerToGreen(i);
+
+				}else{
+					setSelectableMarkerToRed(i);
+				}
+
+				break;
+
+			case 1:
+				//test pickup_plan_only
+				if(pickup_plan_only()){
+
+					successful_grasps_counter++;
+
+					setSelectableMarkerToGreen(i);
+
+				}else{
+					setSelectableMarkerToRed(i);
+				}
+				break;
+			case 2:
+				//pickup with manual pick function
+				if(pickup_manually(true)){
+
+					successful_grasps_counter++;
+
+					setSelectableMarkerToGreen(i);
+
+				}else{
+					setSelectableMarkerToRed(i);
+				}
+
+
+				break;
 			}
-			*/
-
-			//test pickup_plan_only
-
-			if(pickup_plan_only()){
-
-				successful_grasps_counter++;
-
-				setSelectableMarkerToGreen(i);
-
-			}else{
-				setSelectableMarkerToRed(i);
-			}
-
 
 
 		}
@@ -1216,7 +1285,7 @@ public:
 
 		ROS_INFO("Draw grasps");
 
-		for (size_t i = 0; i <= grasps.size(); i++) {
+		for (size_t i = 0; i < grasps.size(); i++) {
 
 
 			makeSelectableMarker(i, grasps[i].grasp_pose);
@@ -2182,7 +2251,7 @@ public:
 
 			//Pickup manually
 			case 2:
-				pickup_manually();
+				pickup_manually(true);
 				break;
 
 			//"Plan only"
@@ -2191,7 +2260,7 @@ public:
 				break;
 			//Reachability test
 			case 4:
-				do_reachability_test();
+				do_reachability_test(2);
 				break;
 
 			case 5:
