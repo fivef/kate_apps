@@ -142,6 +142,7 @@ private:
 
 	std::vector<manipulation_msgs::Grasp> pickup_grasps;
 
+	moveit_msgs::CollisionObject object_to_manipulate_object;
 	std::string object_to_manipulate;
 	int object_to_manipulate_index;
 
@@ -188,6 +189,8 @@ private:
 	ros::ServiceClient get_planning_scene_srv;
 	ros::ServiceClient evaluate_point_cluster_grasp_srv_client;
 	ros::ServiceClient execute_kinematic_path_srv;
+
+	ros::Publisher attached_object_publisher;
 
 	actionlib::SimpleActionClient<manipulation_msgs::GraspPlanningAction> plan_point_cluster_grasp_action_client;
 
@@ -321,6 +324,8 @@ public:
 		vis_marker_publisher = nh.advertise<visualization_msgs::Marker>(
 				"pick_and_place_markers", 128);
 
+		attached_object_publisher = nh.advertise<moveit_msgs::AttachedCollisionObject>("attached_collision_object", 1);
+
 		//ineractive marker server
 		server.reset(
 				new interactive_markers::InteractiveMarkerServer(
@@ -424,7 +429,13 @@ public:
 
 		ROS_INFO_STREAM("Picking up nearest segmented object");
 
-		detect_objects_on_table();
+		if(detect_objects_on_table() != 0){
+
+			ROS_INFO("Object Detection Failed");
+
+			return -1;
+
+		}
 
 		find_nearest_object();
 
@@ -439,7 +450,7 @@ public:
 		//pickup_grasps.push_back(normal_grasp);
 		pickup_grasps.at(0) = normal_grasp;
 
-		setMarkerToPoseStamped(pickup_grasps.at(0).grasp_pose);
+		setMarkerToPoseStamped(normal_grasp.grasp_pose);
 
 		draw_pickup_grasps_to_try();
 
@@ -519,7 +530,10 @@ public:
 			ROS_INFO_STREAM("Joint states before gripper open: " << joint_names[i]);
 		}
 
-		gripper->setStartStateToCurrentState();
+		//gripper->setStartStateToCurrentState();
+
+
+		gripper->setJointValueTarget("jaco_joint_6",gripper->getCurrentJointValues()[0]);
 
 		gripper->setJointValueTarget(FINGER_JOINT + "_1", gripper_open);
 		gripper->setJointValueTarget(FINGER_JOINT + "_2", gripper_open);
@@ -540,7 +554,10 @@ public:
 	}
 
 	bool close_gripper(bool plan_only = false){
-		gripper->setStartStateToCurrentState();
+		//gripper->setStartStateToCurrentState();
+
+		//gripper->setJointValueTarget(gripper->getJointValueTarget());
+		gripper->setJointValueTarget("jaco_joint_6",gripper->getCurrentJointValues()[0]);
 
 		gripper->setJointValueTarget(FINGER_JOINT + "_1", gripper_closed);
 		gripper->setJointValueTarget(FINGER_JOINT + "_2", gripper_closed);
@@ -671,9 +688,9 @@ public:
 			execute_kinematic_path_srv.call(srv);
 		}
 
-
-		attach_object_to_gripper();
-
+		//Remove the object to grasp to allow the gripper to close without collisions
+		//it would be better to disable collisions completely here
+		remove_collision_object_from_scene(object_to_manipulate_object);
 
 		if(close_gripper(plan_only)){
 
@@ -682,25 +699,25 @@ public:
 			return false;
 		}
 
+		attach_object_to_gripper(object_to_manipulate_object);
+
 		return true;
 	}
 
-	int attach_object_to_gripper(){
+	int attach_object_to_gripper(moveit_msgs::CollisionObject collision_object){
 
-		ros::Publisher attached_object_publisher = nh.advertise<moveit_msgs::AttachedCollisionObject>("attached_collision_object", 1);
 		while(attached_object_publisher.getNumSubscribers() < 1)
 		{
 		ros::WallDuration sleep_t(0.5);
 		sleep_t.sleep();
 		}
 
-		/* Define the attached object message*/
 		moveit_msgs::AttachedCollisionObject attached_object;
 		attached_object.link_name = GRIPPER_FRAME;
-		/* The header must contain a valid TF frame*/
-		attached_object.object.header.frame_id = "GRIPPER_FRAME";
-		/* The id of the object */
-		attached_object.object.id = "dummy";
+
+		attached_object.object = collision_object;
+
+		attached_object_publisher.publish(attached_object);
 
 		return 1;
 	}
@@ -818,6 +835,13 @@ public:
 		//graspPlanningGoal.target.cluster =
 				//graspable_objects[object_to_manipulate_index];
 
+		if(graspable_objects.size() == 0){
+
+			ROS_ERROR("No objects available");
+
+			return 0;
+		}
+
 		graspPlanningGoal.target = graspable_objects[object_to_manipulate_index];
 
 		graspPlanningGoal.arm_name = ARM_NAME;
@@ -842,6 +866,8 @@ public:
 			pickup_grasps.resize(0);
 			pickup_grasps =
 					plan_point_cluster_grasp_action_client.getResult()->grasps;
+
+			return 1;
 
 			/*
 			std::vector<manipulation_msgs::Grasp> generated_grasps;
@@ -934,6 +960,13 @@ public:
 
 		return 0;
 
+	}
+
+	void remove_collision_object_from_scene(moveit_msgs::CollisionObject collision_object){
+
+		collision_object.operation = moveit_msgs::CollisionObject::REMOVE;
+
+		pub_collision_object.publish(collision_object);
 	}
 
 	/*
@@ -1057,7 +1090,7 @@ public:
 				break;
 			case 2:
 				//pickup with manual pick function
-				if(pickup_manually(true)){
+				if(pickup_manually(false)){
 
 					successful_grasps_counter++;
 
@@ -1097,12 +1130,23 @@ public:
 		endPoint.z = 1.5;
 		*/
 
+		/* good settings
 		geometry_msgs::Point startPoint;
 		startPoint.x = 0;
 		startPoint.y = -0.9;
 		startPoint.z = 0.4;
 		geometry_msgs::Point endPoint;
 		endPoint.x = 0.8;
+		endPoint.y = 0.9;
+		endPoint.z = 1.2;
+		*/
+
+		geometry_msgs::Point startPoint;
+		startPoint.x = 0.4;
+		startPoint.y = -0.7;
+		startPoint.z = 0.4;
+		geometry_msgs::Point endPoint;
+		endPoint.x = 0.7;
 		endPoint.y = 0.9;
 		endPoint.z = 1.2;
 
@@ -1232,12 +1276,12 @@ public:
 		g.approach.direction.vector.x = 1.0;
 		g.approach.direction.header.frame_id = GRIPPER_FRAME;
 		g.approach.min_distance = 0.03;
-		g.approach.desired_distance = 0.25;
+		g.approach.desired_distance = 0.15;
 
-		g.retreat.direction.header.frame_id = BASE_LINK;
+		g.retreat.direction.header.frame_id = GRIPPER_FRAME;
 		g.retreat.direction.vector.z = 1.0;
 		g.retreat.min_distance = 0.03;
-		g.retreat.desired_distance = 0.25;
+		g.retreat.desired_distance = 0.15;
 
 		g.pre_grasp_posture.header.frame_id = BASE_LINK;
 		g.pre_grasp_posture.header.stamp = ros::Time::now();
@@ -1967,6 +2011,8 @@ public:
 			string id =
 					get_planning_scene_call.response.scene.world.collision_objects[nearest_object_ind].id;
 
+			object_to_manipulate_object = get_planning_scene_call.response.scene.world.collision_objects[nearest_object_ind];
+
 			object_to_manipulate = id.c_str();
 
 			return true;
@@ -2251,7 +2297,7 @@ public:
 
 			//Pickup manually
 			case 2:
-				pickup_manually(true);
+				pickup_manually();
 				break;
 
 			//"Plan only"
