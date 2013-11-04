@@ -608,8 +608,11 @@ public:
 
 		group->setPoseTarget(preGraspPose, GRIPPER_FRAME);
 
+
+		moveit::planning_interface::MoveGroup::Plan plan;
+
 		if(plan_only){
-			moveit::planning_interface::MoveGroup::Plan plan;
+
 			if(!group->plan(plan)){
 				ROS_INFO("Pregrasp failed");
 				return false;
@@ -618,8 +621,6 @@ public:
 			group->move();
 
 		}
-
-
 
 
 		//setMarkerToPose(pose);
@@ -1078,7 +1079,7 @@ public:
 
 		ROS_INFO_STREAM("Test grasps type " << type);
 
-		for(size_t i = 0 ; i <= test_grasps.size(); i++){
+		for(size_t i = 0 ; i < test_grasps.size(); i++){
 
 			pickup_grasps.resize(1);
 			pickup_grasps[0] = test_grasps[i];
@@ -1109,6 +1110,9 @@ public:
 				break;
 
 			case 1:
+
+				pickup_grasps.resize(1);
+
 				//test pickup_plan_only
 				if(pickup_plan_only()){
 
@@ -1121,6 +1125,8 @@ public:
 				}
 				break;
 			case 2:
+
+				currentMarkerPose = pickup_grasps[0].grasp_pose;
 				//pickup with manual pick function
 				if(pickup_manually()){
 
@@ -1173,6 +1179,7 @@ public:
 		endPoint.z = 1.2;
 		*/
 
+		/*fewer grasps
 		geometry_msgs::Point startPoint;
 		startPoint.x = 0.4;
 		startPoint.y = -0.7;
@@ -1181,6 +1188,16 @@ public:
 		endPoint.x = 0.7;
 		endPoint.y = 0.9;
 		endPoint.z = 1.2;
+		*/
+
+		geometry_msgs::Point startPoint;
+		startPoint.x = 0.7;
+		startPoint.y = -0.2;
+		startPoint.z = 0.9;
+		geometry_msgs::Point endPoint;
+		endPoint.x = 0.8;
+		endPoint.y = 0.2;
+		endPoint.z = 1.4;
 
 		double step_size = 0.2;
 
@@ -2343,7 +2360,7 @@ public:
 
 			case 5:
 
-				detect_objects_on_table();
+				do_reachability_test(1);
 				break;
 			}
 			break;
