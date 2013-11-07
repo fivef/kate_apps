@@ -260,13 +260,18 @@ public:
 
 		//group->setPoseReferenceFrame(BASE_LINK);
 
-		//group->setPlanningTime(5.0);
+		group->setPlanningTime(20.0);
+
+
 
 		//TODO check / comment
 		//group->setGoalTolerance(10);
 		//group->setGoalOrientationTolerance(0.005);
-		group->setPlannerId("RRTConnectkConfigDefault");
+		//group->setPlannerId("RRTConnectkConfigDefault");
 
+		ROS_INFO_STREAM("Planning time: " << group->getPlanningTime());
+		group->setPlannerId("RRTConnectkConfigDefault");
+		                            //RRTConnectkConfigDefault
 		group->setPoseReferenceFrame(BASE_LINK);
 
 		group->allowReplanning(true);
@@ -276,6 +281,8 @@ public:
 		group->setEndEffectorLink(GRIPPER_FRAME);
 
 		group->setWorkspace(-0.5, -0.6, -0.3, 0.6, 0.6, 1.5);
+
+
 
 
 
@@ -622,7 +629,6 @@ public:
 
 		}
 
-
 		//setMarkerToPose(pose);
 
 		ROS_INFO("//PHASE 2 // open gripper");
@@ -728,7 +734,35 @@ public:
 			execute_kinematic_path_srv.call(srv);
 		}
 
+		//Check if the whole grasping process was successful by comparing the retreatPose with the current pose
+		if(!plan_only){
+			if(compareTwoValuesWithThreshold(retreatPose.pose.position.z,group->getCurrentPose().pose.position.z)){
+				if(compareTwoValuesWithThreshold(retreatPose.pose.position.y,group->getCurrentPose().pose.position.y)){
+					if(compareTwoValuesWithThreshold(retreatPose.pose.position.x,group->getCurrentPose().pose.position.x)){
+						return true;
+					}
+
+				}
+			}
+
+			return false;
+		}
+
 		return true;
+	}
+
+
+	bool compareTwoValuesWithThreshold(double value, double value_to_compare_to){
+
+		double threshold = 0.06;
+
+		if(value > (value_to_compare_to - threshold)){
+			if(value < (value_to_compare_to + threshold)){
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	int attach_object_to_gripper(moveit_msgs::CollisionObject collision_object){
@@ -767,7 +801,8 @@ public:
 		pickupGoal.group_name = ARM_NAME;
 		pickupGoal.end_effector = "gripper";
 		pickupGoal.support_surface_name = "table";
-		pickupGoal.allowed_planning_time = 5.0;
+		pickupGoal.allowed_planning_time = 20.0;
+		pickupGoal.planner_id = "arm[RRTConnectkConfigDefault]";
 		//pickupGoal.minimize_object_distance = true; Does this work?
 
 		moveit_msgs::PlanningOptions planning_options;
@@ -782,9 +817,9 @@ public:
 
 		pickupGoal.possible_grasps = pickup_grasps;
 
-		ROS_INFO_STREAM("Pickup Plan: Pickup Grasps size: " << pickup_grasps.size());
+		//ROS_DEBUG_STREAM("Pickup Plan: Pickup Grasps size: " << pickup_grasps.size());
 
-		ROS_INFO_STREAM("Pickup Plan: Grasp Pose: " << pickup_grasps[0].grasp_pose);
+		//ROS_DEBUG_STREAM("Pickup Plan: Grasp Pose: " << pickup_grasps[0].grasp_pose);
 
 		pickup_action_client.sendGoal(pickupGoal);
 
@@ -1168,7 +1203,8 @@ public:
 		endPoint.z = 1.5;
 		*/
 
-		/* good settings
+		/*
+		// good settings 225 grasps used for tests
 		geometry_msgs::Point startPoint;
 		startPoint.x = 0;
 		startPoint.y = -0.9;
@@ -1178,6 +1214,16 @@ public:
 		endPoint.y = 0.9;
 		endPoint.z = 1.2;
 		*/
+
+		geometry_msgs::Point startPoint;
+		startPoint.x = 0.4;
+		startPoint.y = -0.6;
+		startPoint.z = 0.5;
+		geometry_msgs::Point endPoint;
+		endPoint.x = 0.9;
+		endPoint.y = 0.7;
+		endPoint.z = 1.4;
+
 
 		/*fewer grasps
 		geometry_msgs::Point startPoint;
@@ -1190,14 +1236,16 @@ public:
 		endPoint.z = 1.2;
 		*/
 
+		/* 16 grasps
 		geometry_msgs::Point startPoint;
 		startPoint.x = 0.7;
 		startPoint.y = -0.2;
-		startPoint.z = 0.9;
+		startPoint.z = 0.8;
 		geometry_msgs::Point endPoint;
 		endPoint.x = 0.8;
 		endPoint.y = 0.2;
 		endPoint.z = 1.4;
+		*/
 
 		double step_size = 0.2;
 
@@ -1360,14 +1408,18 @@ public:
 		g.grasp_posture.position[2] = gripper_closed;
 
 
+
+
 		//object allowd to be touche while approaching
 
 		g.allowed_touch_objects.resize(1);
 		g.allowed_touch_objects[0] = "all";
 
-		ROS_DEBUG_STREAM("Grasp frame id: " << g.grasp_pose.header.frame_id);
+		g.grasp_quality = 1;
 
-		ROS_DEBUG_STREAM("Grasp Pose" << g.grasp_pose.pose);
+		//ROS_DEBUG_STREAM("Grasp frame id: " << g.grasp_pose.header.frame_id);
+
+		//ROS_DEBUG_STREAM("Grasp Pose" << g.grasp_pose.pose);
 
 
 		return g;
@@ -2224,9 +2276,11 @@ public:
 				boost::bind(&Pick_and_place_app::processFeedback, this, _1));
 		menu_handler.insert("Pickup Plan only",
 				boost::bind(&Pick_and_place_app::processFeedback, this, _1));
-		menu_handler.insert("Reachability Test",
+		menu_handler.insert("Reachability Test own pick function",
 				boost::bind(&Pick_and_place_app::processFeedback, this, _1));
-		menu_handler.insert("reset_collision_environment",
+		menu_handler.insert("Reachability Test moveit pick",
+				boost::bind(&Pick_and_place_app::processFeedback, this, _1));
+		menu_handler.insert("Reachability Test just move to",
 				boost::bind(&Pick_and_place_app::processFeedback, this, _1));
 
 
@@ -2361,6 +2415,14 @@ public:
 			case 5:
 
 				do_reachability_test(1);
+				break;
+
+			case 6:
+				//do test 1 and 2 each 3 times
+				//for(int i = 0 ; i<3 ; i++){
+					do_reachability_test(0);
+				//}
+
 				break;
 			}
 			break;
